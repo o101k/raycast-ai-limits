@@ -1,3 +1,4 @@
+import type { RegionField } from "./connect";
 import type { Connections } from "./connections";
 import type { Settings } from "./types";
 
@@ -5,6 +6,12 @@ import type { Settings } from "./types";
 function clean(value: string | undefined): string | undefined {
   const trimmed = value?.trim();
   return trimmed ? trimmed : undefined;
+}
+
+// The region an API key form starts on. It is the region the provider already has, so a key saved as China doesn't
+// reopen on Global. Without a region field, or without a saved region, it is global.
+export function startRegion(settings: Settings, field: RegionField | undefined): "global" | "china" {
+  return (field && settings[field]) || "global";
 }
 
 // Builds the provider settings from the Raycast preferences and the connections the extension stored itself. A value

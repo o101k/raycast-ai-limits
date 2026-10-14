@@ -89,15 +89,24 @@ export async function findExecutable(deps: Deps, name: string, path: string): Pr
 
 // Runs a CLI's own sign-in and resolves when it exits. PATH goes in the child's environment so that a
 // `#!/usr/bin/env node` script can find node. A run that rejects (it took longer than the timeout, or was killed) is
-// reported as cancelled.
-export async function runSignIn(deps: Deps, command: SignInCommand, path: string): Promise<SignInResult> {
+// reported as cancelled. When `signal` aborted, the run was stopped on purpose, so the message says so.
+export async function runSignIn(
+  deps: Deps,
+  command: SignInCommand,
+  path: string,
+  signal?: AbortSignal,
+): Promise<SignInResult> {
   let result: RunResult;
   try {
     result = await deps.run(command.executable, [...command.args], {
       timeoutMs: SIGN_IN_TIMEOUT_MS,
       env: { ...deps.env, PATH: path },
+      signal,
     });
   } catch {
+    if (signal?.aborted) {
+      return { ok: false, reason: "cancelled", message: "Sign-in was cancelled" };
+    }
     return { ok: false, reason: "cancelled", message: "Sign-in timed out" };
   }
   if (result.exitCode === 0) {
@@ -181,32 +190,32 @@ function defaultSleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// Whether Codex has a login file. It lives in CODEX_HOME when that is set, the same as codex.ts reads it.
-export async function hasCodexLogin(deps: Deps): Promise<boolean> {
+// Codex's login file as text. It lives in CODEX_HOME when that is set, the same as codex.ts reads it. Connect compares
+// the text before and after a sign-in, so a login that was replaced can be told apart from the old one.
+export async function readCodexLogin(deps: Deps): Promise<string | null> {
   const home = deps.env.CODEX_HOME || `${deps.homedir}/.codex`;
-  return fileExists(deps, `${home}/auth.json`);
+  return readText(deps, `${home}/auth.json`);
 }
 
-export async function hasGeminiLogin(deps: Deps): Promise<boolean> {
-  return fileExists(deps, `${deps.homedir}/${GEMINI_CREDENTIALS}`);
+export async function readGeminiLogin(deps: Deps): Promise<string | null> {
+  return readText(deps, `${deps.homedir}/${GEMINI_CREDENTIALS}`);
 }
 
-// Whether the Cursor app has a login token in its state database. A missing or unreadable database means no login.
-export async function hasCursorLogin(deps: Deps): Promise<boolean> {
+// The login token the Cursor app keeps in its state database. A missing or unreadable database means no login.
+export async function readCursorLogin(deps: Deps): Promise<string | null> {
   try {
-    const output = await deps.sqlite(deps.homedir + STATE_DB, TOKEN_QUERY);
-    return output.trim() !== "";
+    const token = (await deps.sqlite(deps.homedir + STATE_DB, TOKEN_QUERY)).trim();
+    return token === "" ? null : token;
   } catch {
-    return false;
+    return null;
   }
 }
 
-// Deps has no existence check, so a read stands in for one. A read error is treated as "not there yet", since the
-// caller is polling.
-async function fileExists(deps: Deps, path: string): Promise<boolean> {
+// Deps has no existence check, so a read stands in for one. A read error counts as not there.
+async function readText(deps: Deps, path: string): Promise<string | null> {
   try {
-    return (await deps.readFile(path)) !== null;
+    return await deps.readFile(path);
   } catch {
-    return false;
+    return null;
   }
 }

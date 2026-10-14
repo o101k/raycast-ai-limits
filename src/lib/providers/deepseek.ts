@@ -4,7 +4,7 @@ import { asArray, asNumber, asRecord, asString, requestJson } from "../http";
 import { Balance, ProviderError, ProviderUsage, Settings } from "../types";
 
 const BALANCE_URL = "https://api.deepseek.com/user/balance";
-const CREATE_KEY_URL = "https://platform.deepseek.com/api_keys";
+export const CREATE_KEY_URL = "https://platform.deepseek.com/api_keys";
 const AUTH_HINT =
   "Choose Connect DeepSeek from this item's actions to enter a new key, or check the key in the extension preferences";
 

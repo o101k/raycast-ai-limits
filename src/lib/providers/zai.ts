@@ -5,7 +5,7 @@ import { ProviderError, ProviderUsage, Settings, UsageWindow } from "../types";
 const GLOBAL_QUOTA_URL = "https://api.z.ai/api/monitor/usage/quota/limit";
 // The China console serves the same quota path on the BigModel host.
 const CHINA_QUOTA_URL = "https://open.bigmodel.cn/api/monitor/usage/quota/limit";
-const CREATE_KEY_URL = "https://z.ai/manage-apikey";
+export const CREATE_KEY_URL = "https://z.ai/manage-apikey/apikey-list";
 const AUTH_HINT =
   "Choose Connect z.ai from this item's actions to enter a new key, or check the key in the extension preferences";
 const CODING_PLAN_HINT = "Check that this key belongs to a GLM Coding Plan";

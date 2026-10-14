@@ -3,11 +3,11 @@ import {
   CLI_SIGN_IN,
   CURSOR_BUNDLE_ID,
   findExecutable,
-  hasCodexLogin,
-  hasCursorLogin,
-  hasGeminiLogin,
   openApp,
   openInTerminal,
+  readCodexLogin,
+  readCursorLogin,
+  readGeminiLogin,
   resolveUserPath,
   runSignIn,
   waitFor,
@@ -266,6 +266,29 @@ describe("runSignIn", () => {
       message: "Sign-in timed out",
     });
   });
+
+  it("passes the signal to the run, so the CLI is stopped when the command closes", async () => {
+    const deps = fakeDeps();
+    deps.programs.push({ file: COMMAND.executable, respond: DONE });
+    const controller = new AbortController();
+
+    await runSignIn(deps, COMMAND, "/usr/bin", controller.signal);
+
+    expect(deps.runCalls[0].options?.signal).toBe(controller.signal);
+  });
+
+  it("reports a run stopped by the signal as cancelled by the user, not as a timeout", async () => {
+    const deps = fakeDeps();
+    deps.programs.push({ file: COMMAND.executable, respond: DONE });
+    const controller = new AbortController();
+    controller.abort();
+
+    expect(await runSignIn(deps, COMMAND, "/usr/bin", controller.signal)).toEqual({
+      ok: false,
+      reason: "cancelled",
+      message: "Sign-in was cancelled",
+    });
+  });
 });
 
 describe("CLI_SIGN_IN", () => {
@@ -456,59 +479,68 @@ describe("waitFor", () => {
   });
 });
 
-describe("hasCodexLogin", () => {
-  it("is true when auth.json exists under ~/.codex", async () => {
-    const deps = fakeDeps({ files: { [`${HOME}/.codex/auth.json`]: "{}" } });
+describe("readCodexLogin", () => {
+  it("returns the text of auth.json under ~/.codex", async () => {
+    const deps = fakeDeps({ files: { [`${HOME}/.codex/auth.json`]: '{"tokens":{}}' } });
 
-    expect(await hasCodexLogin(deps)).toBe(true);
+    expect(await readCodexLogin(deps)).toBe('{"tokens":{}}');
   });
 
-  it("is false when there is no login file", async () => {
-    expect(await hasCodexLogin(fakeDeps())).toBe(false);
+  it("is null when there is no login file", async () => {
+    expect(await readCodexLogin(fakeDeps())).toBeNull();
   });
 
   it("looks in CODEX_HOME instead of ~/.codex when it is set", async () => {
     const deps = fakeDeps({ files: { [`${HOME}/.codex/auth.json`]: "{}" } });
     deps.env.CODEX_HOME = "/Volumes/work/codex";
 
-    expect(await hasCodexLogin(deps)).toBe(false);
+    expect(await readCodexLogin(deps)).toBeNull();
 
-    deps.files.set("/Volumes/work/codex/auth.json", "{}");
-    expect(await hasCodexLogin(deps)).toBe(true);
+    deps.files.set("/Volumes/work/codex/auth.json", '{"work":true}');
+    expect(await readCodexLogin(deps)).toBe('{"work":true}');
+  });
+
+  it("is null when the file can't be read", async () => {
+    const deps = fakeDeps();
+    deps.readFile = async () => {
+      throw new Error("EACCES: permission denied");
+    };
+
+    expect(await readCodexLogin(deps)).toBeNull();
   });
 });
 
-describe("hasGeminiLogin", () => {
-  it("is true when oauth_creds.json exists", async () => {
-    const deps = fakeDeps({ files: { [`${HOME}/.gemini/oauth_creds.json`]: "{}" } });
+describe("readGeminiLogin", () => {
+  it("returns the text of oauth_creds.json", async () => {
+    const deps = fakeDeps({ files: { [`${HOME}/.gemini/oauth_creds.json`]: '{"refresh_token":"r"}' } });
 
-    expect(await hasGeminiLogin(deps)).toBe(true);
+    expect(await readGeminiLogin(deps)).toBe('{"refresh_token":"r"}');
   });
 
-  it("is false when there is no login file", async () => {
-    expect(await hasGeminiLogin(fakeDeps())).toBe(false);
+  it("is null when there is no login file", async () => {
+    expect(await readGeminiLogin(fakeDeps())).toBeNull();
   });
 });
 
-describe("hasCursorLogin", () => {
+describe("readCursorLogin", () => {
   const DB_PATH = `${HOME}/Library/Application Support/Cursor/User/globalStorage/state.vscdb`;
 
-  it("is true when the app's state database holds an access token", async () => {
+  it("returns the access token from the app's state database, trimmed", async () => {
     const deps = fakeDeps();
     deps.sqliteResults.set(DB_PATH, "eyJhbGciOiJub25lIn0.e30.sig\n");
 
-    expect(await hasCursorLogin(deps)).toBe(true);
+    expect(await readCursorLogin(deps)).toBe("eyJhbGciOiJub25lIn0.e30.sig");
     expect(deps.sqliteCalls).toEqual([{ dbPath: DB_PATH, sql: TOKEN_QUERY }]);
   });
 
-  it("is false when the token is empty", async () => {
+  it("is null when the token is empty", async () => {
     const deps = fakeDeps();
     deps.sqliteResults.set(DB_PATH, "  \n");
 
-    expect(await hasCursorLogin(deps)).toBe(false);
+    expect(await readCursorLogin(deps)).toBeNull();
   });
 
-  it("is false when the database can't be opened, as when the app was never signed in", async () => {
-    expect(await hasCursorLogin(fakeDeps())).toBe(false);
+  it("is null when the database can't be opened, as when the app was never signed in", async () => {
+    expect(await readCursorLogin(fakeDeps())).toBeNull();
   });
 });

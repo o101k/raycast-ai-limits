@@ -477,6 +477,7 @@ describe("fetchClaudeUsage with the claude.ai session key", () => {
     expect(error).toBeInstanceOf(ProviderError);
     expect(error).toMatchObject({ kind: "not-connected", message: "No Claude login found" });
     expect((error as ProviderError).hint).toContain("Connect Claude Code");
+    expect((error as ProviderError).hint).toContain("Use Claude Session Key");
     expect(deps.requests).toEqual([]);
   });
 });

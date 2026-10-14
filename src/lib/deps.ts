@@ -35,6 +35,8 @@ export interface RunOptions {
   timeoutMs?: number;
   // Replaces the environment of the child. Defaults to this process's environment.
   env?: Record<string, string | undefined>;
+  // Stops the child when aborted, so a sign-in that waits for the browser doesn't outlive the command.
+  signal?: AbortSignal;
 }
 
 export interface RunResult {
@@ -76,7 +78,12 @@ export function realDeps(): Deps {
         execFile(
           file,
           args,
-          { timeout: options?.timeoutMs ?? 10_000, env: options?.env ?? process.env, maxBuffer: 1024 * 1024 },
+          {
+            timeout: options?.timeoutMs ?? 10_000,
+            env: options?.env ?? process.env,
+            maxBuffer: 1024 * 1024,
+            signal: options?.signal,
+          },
           (error, stdout, stderr) => {
             if (error && (typeof error.code !== "number" || error.killed)) {
               reject(error);

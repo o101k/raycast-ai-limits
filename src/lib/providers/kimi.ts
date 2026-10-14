@@ -6,7 +6,7 @@ import { ProviderError, ProviderUsage, Settings, UsageWindow } from "../types";
 // doesn't have the route, which is how CodexBar reaches the international account.
 const PRIMARY_URL = "https://api.kimi.com/coding/v1/usages";
 const FALLBACK_URL = "https://api.kimi.ai/coding/v1/usages";
-const CREATE_KEY_URL = "https://www.kimi.com/code/console";
+export const CREATE_KEY_URL = "https://www.kimi.com/code/console";
 const AUTH_HINT =
   "Choose Connect Kimi Code from this item's actions to enter a new key, or check the key in the extension preferences";
 const FIVE_HOUR_MINUTES = 300;

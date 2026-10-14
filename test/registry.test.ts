@@ -2,6 +2,10 @@ import { describe, expect, it } from "vitest";
 import { ConnectMethod } from "../src/lib/connect";
 import { Connections } from "../src/lib/connections";
 import { PROVIDERS } from "../src/lib/providers";
+import { CREATE_KEY_URL as DEEPSEEK_CREATE_KEY_URL } from "../src/lib/providers/deepseek";
+import { CREATE_KEY_URL as KIMI_CREATE_KEY_URL } from "../src/lib/providers/kimi";
+import { CREATE_KEY_URL as MOONSHOT_CREATE_KEY_URL } from "../src/lib/providers/moonshot";
+import { CREATE_KEY_URL as ZAI_CREATE_KEY_URL } from "../src/lib/providers/zai";
 import { ProviderError, ProviderId, Settings } from "../src/lib/types";
 import { fakeDeps } from "./fake-deps";
 
@@ -58,6 +62,22 @@ describe("provider connect methods", () => {
     for (const provider of PROVIDERS) {
       if (provider.connect.kind === "api-key") {
         expect(provider.connect.keyUrl).toMatch(/^https:\/\//);
+      }
+    }
+  });
+
+  it("links each API-key method to the key page its provider module uses", () => {
+    // The registry takes these from the provider modules, so the Connect link and the hint in the error stay the same.
+    const keyPages: Record<string, string> = {
+      zai: ZAI_CREATE_KEY_URL,
+      kimi: KIMI_CREATE_KEY_URL,
+      deepseek: DEEPSEEK_CREATE_KEY_URL,
+      moonshot: MOONSHOT_CREATE_KEY_URL,
+    };
+    expect(ZAI_CREATE_KEY_URL).toBe("https://z.ai/manage-apikey/apikey-list");
+    for (const provider of PROVIDERS) {
+      if (provider.connect.kind === "api-key") {
+        expect(provider.connect.keyUrl).toBe(keyPages[provider.id]);
       }
     }
   });

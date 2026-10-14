@@ -32,6 +32,7 @@ import { getGitHubToken, signInWithGitHub, signOutOfGitHub } from "./lib/github-
 import { realDeps } from "./lib/deps";
 import { signInWithOpenRouter } from "./lib/openrouter-signin";
 import { PROVIDERS, Provider } from "./lib/providers";
+import { CREATE_KEY_URL as OPENROUTER_CREATE_KEY_URL } from "./lib/providers/openrouter";
 import { toSettings } from "./lib/settings";
 import {
   applyFailure,
@@ -146,7 +147,7 @@ const CONNECT_TITLES: Partial<Record<ProviderId, string>> = {
 const OPENROUTER_KEY: ApiKeyMethod = {
   kind: "api-key",
   field: "openrouterApiKey",
-  keyUrl: "https://openrouter.ai/settings/keys",
+  keyUrl: OPENROUTER_CREATE_KEY_URL,
   keyPattern: /^sk-or-[A-Za-z0-9-]{20,}$/,
   placeholder: "sk-or-v1-…",
 };
@@ -167,11 +168,11 @@ function fallbackAction(
       return (
         <Action.Push
           key="fallback"
-          title="Use claude.ai Session Key"
+          title="Use Claude Session Key"
           icon={Icon.Key}
           target={
             <SecretForm
-              title="claude.ai Session Key"
+              title="Claude Session Key"
               field="claudeSessionKey"
               placeholder="sk-ant-sid01-…"
               description="Copy the sessionKey cookie for claude.ai from your browser's developer tools. Use it only when Connect Claude Code can't find the login."
@@ -431,14 +432,21 @@ export default function Command() {
   // Claude, Codex, Cursor and Gemini sign in with their own CLI or app on this Mac. The toast shows what that is doing.
   async function connectTool(provider: Provider, method: LocalConnectMethod) {
     const toast = await showToast({ style: Toast.Style.Animated, title: `Connecting ${provider.name}` });
-    const outcome = await connectLocal(realDeps(), method, {
-      progress: (title, message) => {
-        toast.title = title;
-        toast.message = message;
+    // A rejected login is still on disk, so Connect signs in again instead of counting the login that is already there.
+    const relogin = states[provider.id].failure?.kind === "auth";
+    const outcome = await connectLocal(
+      realDeps(),
+      method,
+      {
+        progress: (title, message) => {
+          toast.title = title;
+          toast.message = message;
+        },
+        save: async (patch) => setConnections(await saveConnections(patch)),
+        signal: closeRef.current?.signal,
       },
-      save: async (patch) => setConnections(await saveConnections(patch)),
-      signal: closeRef.current?.signal,
-    }).catch((error: unknown): ConnectOutcome => ({
+      { relogin },
+    ).catch((error: unknown): ConnectOutcome => ({
       kind: "failed",
       title: `Could not connect ${provider.name}`,
       message: errorMessage(error),

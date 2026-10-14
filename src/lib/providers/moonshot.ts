@@ -6,7 +6,7 @@ import { ProviderError, ProviderUsage, Settings } from "../types";
 // Moonshot keeps separate accounts per region, and a key only works on the host that issued it.
 const GLOBAL_ORIGIN = "https://api.moonshot.ai";
 const CHINA_ORIGIN = "https://api.moonshot.cn";
-const CREATE_KEY_URL = "https://platform.moonshot.ai/console/api-keys";
+export const CREATE_KEY_URL = "https://platform.moonshot.ai/console/api-keys";
 const AUTH_HINT =
   "Choose Connect Moonshot from this item's actions to enter a new key, " +
   "or check the key and region in the extension preferences";

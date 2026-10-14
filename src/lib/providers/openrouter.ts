@@ -5,7 +5,7 @@ import { Balance, ProviderError, ProviderUsage, Settings, UsageWindow } from "..
 
 const KEY_URL = "https://openrouter.ai/api/v1/key";
 const CREDITS_URL = "https://openrouter.ai/api/v1/credits";
-const CREATE_KEY_URL = "https://openrouter.ai/settings/keys";
+export const CREATE_KEY_URL = "https://openrouter.ai/settings/keys";
 const AUTH_HINT =
   "Choose Connect OpenRouter from this item's actions to sign in again, or check the key in the extension preferences";
 // Sent on every call. OpenRouter shows the title on its activity pages, so it says which app made the requests.

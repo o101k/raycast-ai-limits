@@ -5,6 +5,7 @@ import { Connections } from "../lib/connections";
 import { saveConnections } from "../lib/connections-store";
 import { realDeps } from "../lib/deps";
 import { Provider } from "../lib/providers";
+import { startRegion } from "../lib/settings";
 import { ProviderError, Settings } from "../lib/types";
 
 // Only the api-key method opens a form, so the form takes that one shape.
@@ -38,7 +39,7 @@ interface ApiKeyFormProps {
 export function ApiKeyForm({ provider, method, settings, onConnected }: ApiKeyFormProps) {
   const { pop } = useNavigation();
   const [key, setKey] = useState("");
-  const [region, setRegion] = useState<Region>("global");
+  const [region, setRegion] = useState<Region>(() => startRegion(settings, method.region));
   const [keyError, setKeyError] = useState<string>();
   const [checking, setChecking] = useState(false);
   // The clipboard poll runs on a timer, so it reads the field's latest value from here, not from the render it

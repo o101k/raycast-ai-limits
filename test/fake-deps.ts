@@ -109,6 +109,10 @@ export function fakeDeps(options: { files?: Record<string, string>; routes?: Rou
     },
     run: async (file, args, options) => {
       runCalls.push({ file, args, options });
+      // Like execFile, a run whose signal is already aborted rejects without starting the program.
+      if (options?.signal?.aborted) {
+        throw Object.assign(new Error("The operation was aborted"), { name: "AbortError", code: "ABORT_ERR" });
+      }
       const program = programs.find((candidate) => candidate.file === file);
       if (!program) {
         throw Object.assign(new Error(`spawn ${file} ENOENT`), { code: "ENOENT" });

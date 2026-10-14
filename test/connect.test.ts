@@ -21,7 +21,9 @@ const CURSOR_DB = `${HOME}${STATE_DB}`;
 const POLL_TOTAL_MS = 10 * 60_000;
 
 const LOGIN_JSON = '{"claudeAiOauth":{"accessToken":"oauth-token-123"}}';
+const RENEWED_JSON = '{"claudeAiOauth":{"accessToken":"renewed-token-456"}}';
 const FOUND: RunResult = { exitCode: 0, stdout: `${LOGIN_JSON}\n`, stderr: "" };
+const RENEWED: RunResult = { exitCode: 0, stdout: `${RENEWED_JSON}\n`, stderr: "" };
 const MISSING: RunResult = { exitCode: 44, stdout: "", stderr: "" };
 const DENIED: RunResult = { exitCode: 128, stdout: "", stderr: "" };
 const OK: RunResult = { exitCode: 0, stdout: "", stderr: "" };
@@ -143,6 +145,16 @@ describe("connectLocal for Claude Code on macOS", () => {
     expect(deps.runCalls.map((call) => call.file)).toEqual([SECURITY]);
   });
 
+  it("turns the Keychain setting back off when macOS denies the read, so later refreshes don't ask again", async () => {
+    const deps = withTools(fakeDeps(), [CLAUDE_BIN]);
+    deps.programs.push({ file: SECURITY, respond: DENIED });
+    const { ui, saved } = testUi();
+
+    await connectLocal(deps, CLAUDE, ui);
+
+    expect(saved).toEqual([{ claudeKeychain: true }, { claudeKeychain: false }]);
+  });
+
   it("signs in when the Keychain has no login, then connects once one is there", async () => {
     const deps = withTools(fakeDeps(), [CLAUDE_BIN]);
     deps.programs.push({ file: SECURITY, respond: inOrder(MISSING, FOUND) });
@@ -190,6 +202,40 @@ describe("connectLocal for Claude Code on macOS", () => {
     });
     expect(progress).not.toHaveBeenCalledWith("Finish signing in in your browser", expect.anything());
   });
+
+  it("signs in again with relogin even though the Keychain holds a login, and connects once it changes", async () => {
+    const deps = withTools(fakeDeps(), [CLAUDE_BIN]);
+    deps.programs.push({ file: SECURITY, respond: inOrder(FOUND, RENEWED) });
+    deps.programs.push({ file: CLAUDE_BIN, respond: OK });
+
+    expect(await connectLocal(deps, CLAUDE, testUi().ui, { relogin: true })).toEqual({ kind: "connected" });
+    expect(deps.runCalls.find((call) => call.file === CLAUDE_BIN)?.args).toEqual(["auth", "login"]);
+  });
+
+  it("does not connect with relogin while the Keychain still holds the rejected login", async () => {
+    const deps = withTools(fakeDeps(), [CLAUDE_BIN]);
+    deps.programs.push({ file: SECURITY, respond: FOUND });
+    deps.programs.push({ file: CLAUDE_BIN, respond: OK });
+
+    expect(await connectLocal(deps, CLAUDE, testUi().ui, { relogin: true })).toEqual({
+      kind: "failed",
+      title: "Claude Code signed in, but its login wasn't found",
+    });
+  });
+
+  it("reads the Keychain first with relogin, so a denied read stops before any sign-in", async () => {
+    const deps = withTools(fakeDeps(), [CLAUDE_BIN]);
+    deps.programs.push({ file: SECURITY, respond: DENIED });
+    const { ui, saved } = testUi();
+
+    expect(await connectLocal(deps, CLAUDE, ui, { relogin: true })).toEqual({
+      kind: "failed",
+      title: "macOS denied access to Claude Code's login",
+      message: "Choose Connect again and click Always Allow",
+    });
+    expect(deps.runCalls.map((call) => call.file)).toEqual([SECURITY]);
+    expect(saved).toEqual([{ claudeKeychain: true }, { claudeKeychain: false }]);
+  });
 });
 
 describe("connectLocal for Claude Code on other platforms", () => {
@@ -231,6 +277,32 @@ describe("connectLocal for Claude Code on other platforms", () => {
     deps.programs.push({ file: CLAUDE_BIN, respond: OK });
 
     expect(await connectLocal(deps, CLAUDE, testUi().ui)).toEqual({
+      kind: "failed",
+      title: "Claude Code signed in, but its login wasn't found",
+    });
+  });
+
+  it("signs in again with relogin even though the credentials file exists, and connects once it changes", async () => {
+    const deps = withTools(fakeDeps({ files: { [CLAUDE_CREDENTIALS]: "{}" } }), [CLAUDE_BIN]);
+    deps.platform = "linux";
+    deps.programs.push({
+      file: CLAUDE_BIN,
+      respond: () => {
+        deps.files.set(CLAUDE_CREDENTIALS, RENEWED_JSON);
+        return OK;
+      },
+    });
+
+    expect(await connectLocal(deps, CLAUDE, testUi().ui, { relogin: true })).toEqual({ kind: "connected" });
+    expect(deps.runCalls.find((call) => call.file === CLAUDE_BIN)?.args).toEqual(["auth", "login"]);
+  });
+
+  it("does not connect with relogin while the credentials file is the rejected login", async () => {
+    const deps = withTools(fakeDeps({ files: { [CLAUDE_CREDENTIALS]: "{}" } }), [CLAUDE_BIN]);
+    deps.platform = "linux";
+    deps.programs.push({ file: CLAUDE_BIN, respond: OK });
+
+    expect(await connectLocal(deps, CLAUDE, testUi().ui, { relogin: true })).toEqual({
       kind: "failed",
       title: "Claude Code signed in, but its login wasn't found",
     });
@@ -304,6 +376,30 @@ describe("connectLocal for Codex", () => {
       title: "Codex sign-in didn't finish",
     });
   });
+
+  it("runs codex login again with relogin, even though auth.json exists, and connects once it changes", async () => {
+    const deps = withTools(fakeDeps({ files: { [CODEX_AUTH]: "{}" } }), [CODEX_BIN]);
+    deps.programs.push({
+      file: CODEX_BIN,
+      respond: () => {
+        deps.files.set(CODEX_AUTH, '{"renewed":true}');
+        return OK;
+      },
+    });
+
+    expect(await connectLocal(deps, CODEX, testUi().ui, { relogin: true })).toEqual({ kind: "connected" });
+    expect(deps.runCalls.find((call) => call.file === CODEX_BIN)?.args).toEqual(["login"]);
+  });
+
+  it("does not connect with relogin while auth.json is still the rejected login", async () => {
+    const deps = withTools(fakeDeps({ files: { [CODEX_AUTH]: "{}" } }), [CODEX_BIN]);
+    deps.programs.push({ file: CODEX_BIN, respond: OK });
+
+    expect(await connectLocal(deps, CODEX, testUi().ui, { relogin: true })).toEqual({
+      kind: "failed",
+      title: "Codex sign-in didn't finish",
+    });
+  });
 });
 
 describe("connectLocal for Gemini CLI", () => {
@@ -365,6 +461,31 @@ describe("connectLocal for Gemini CLI", () => {
     expect(clock.sleeps.reduce((total, ms) => total + ms, 0)).toBe(POLL_TOTAL_MS);
     expect(clock.sleeps.every((ms) => ms === 2_000)).toBe(true);
   });
+
+  it("opens Terminal again with relogin, and connects once the login is replaced", async () => {
+    const deps = withTools(fakeDeps({ files: { [GEMINI_CREDENTIALS]: "{}" } }), [GEMINI_BIN]);
+    deps.programs.push({ file: OSASCRIPT, respond: OK });
+    const { ui } = testUi({
+      sleep: async () => {
+        deps.files.set(GEMINI_CREDENTIALS, '{"renewed":true}');
+      },
+    });
+
+    expect(await connectLocal(deps, GEMINI, ui, { relogin: true })).toEqual({ kind: "connected" });
+    expect(deps.runCalls.some((call) => call.file === OSASCRIPT)).toBe(true);
+  });
+
+  it("keeps waiting past the rejected login with relogin, and gives up after 10 minutes", async () => {
+    const deps = withTools(fakeDeps({ files: { [GEMINI_CREDENTIALS]: "{}" } }), [GEMINI_BIN]);
+    deps.programs.push({ file: OSASCRIPT, respond: OK });
+    const clock = steppingClock(deps);
+
+    expect(await connectLocal(deps, GEMINI, testUi({ sleep: clock.sleep }).ui, { relogin: true })).toEqual({
+      kind: "failed",
+      title: "Gemini CLI sign-in didn't finish",
+    });
+    expect(clock.sleeps.reduce((total, ms) => total + ms, 0)).toBe(POLL_TOTAL_MS);
+  });
 });
 
 describe("connectLocal for Cursor", () => {
@@ -413,5 +534,57 @@ describe("connectLocal for Cursor", () => {
       title: "Cursor sign-in didn't finish",
     });
     expect(clock.sleeps.reduce((total, ms) => total + ms, 0)).toBe(POLL_TOTAL_MS);
+  });
+
+  it("opens Cursor again with relogin, and connects once its token is replaced", async () => {
+    const deps = fakeDeps();
+    deps.sqliteResults.set(CURSOR_DB, "eyJhbGciOiJub25lIn0.old.sig");
+    deps.programs.push({ file: OPEN, respond: OK });
+    const { ui } = testUi({
+      sleep: async () => {
+        deps.sqliteResults.set(CURSOR_DB, "eyJhbGciOiJub25lIn0.new.sig");
+      },
+    });
+
+    expect(await connectLocal(deps, CURSOR, ui, { relogin: true })).toEqual({ kind: "connected" });
+    expect(deps.runCalls.some((call) => call.file === OPEN)).toBe(true);
+  });
+
+  it("keeps waiting past the rejected token with relogin, and gives up after 10 minutes", async () => {
+    const deps = fakeDeps();
+    deps.sqliteResults.set(CURSOR_DB, "eyJhbGciOiJub25lIn0.old.sig");
+    deps.programs.push({ file: OPEN, respond: OK });
+    const clock = steppingClock(deps);
+
+    expect(await connectLocal(deps, CURSOR, testUi({ sleep: clock.sleep }).ui, { relogin: true })).toEqual({
+      kind: "failed",
+      title: "Cursor sign-in didn't finish",
+    });
+    expect(clock.sleeps.reduce((total, ms) => total + ms, 0)).toBe(POLL_TOTAL_MS);
+  });
+});
+
+describe("connectLocal when Connect is closed during a sign-in", () => {
+  it("passes the Connect signal to the sign-in run", async () => {
+    const deps = withTools(fakeDeps(), [CODEX_BIN]);
+    deps.programs.push({ file: CODEX_BIN, respond: OK });
+    const controller = new AbortController();
+
+    await connectLocal(deps, CODEX, testUi({ signal: controller.signal }).ui);
+
+    expect(deps.runCalls.find((call) => call.file === CODEX_BIN)?.options?.signal).toBe(controller.signal);
+  });
+
+  it("reports the sign-in as cancelled when the command was closed before it ran", async () => {
+    const deps = withTools(fakeDeps(), [CODEX_BIN]);
+    deps.programs.push({ file: CODEX_BIN, respond: OK });
+    const controller = new AbortController();
+    controller.abort();
+
+    expect(await connectLocal(deps, CODEX, testUi({ signal: controller.signal }).ui)).toEqual({
+      kind: "failed",
+      title: "Codex sign-in didn't finish",
+      message: "Sign-in was cancelled",
+    });
   });
 });

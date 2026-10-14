@@ -6,12 +6,12 @@ import { fetchClaudeUsage } from "./claude";
 import { fetchCodexUsage } from "./codex";
 import { fetchCopilotUsage } from "./copilot";
 import { fetchCursorUsage } from "./cursor";
-import { fetchDeepSeekUsage } from "./deepseek";
+import { CREATE_KEY_URL as DEEPSEEK_CREATE_KEY_URL, fetchDeepSeekUsage } from "./deepseek";
 import { fetchGeminiUsage } from "./gemini";
-import { fetchKimiUsage } from "./kimi";
-import { fetchMoonshotUsage } from "./moonshot";
+import { CREATE_KEY_URL as KIMI_CREATE_KEY_URL, fetchKimiUsage } from "./kimi";
+import { CREATE_KEY_URL as MOONSHOT_CREATE_KEY_URL, fetchMoonshotUsage } from "./moonshot";
 import { fetchOpenRouterUsage } from "./openrouter";
-import { fetchZaiUsage } from "./zai";
+import { CREATE_KEY_URL as ZAI_CREATE_KEY_URL, fetchZaiUsage } from "./zai";
 
 export interface Provider {
   id: ProviderId;
@@ -93,7 +93,7 @@ export const PROVIDERS: Provider[] = [
       kind: "api-key",
       field: "zaiApiKey",
       region: "zaiRegion",
-      keyUrl: "https://z.ai/manage-apikey/apikey-list",
+      keyUrl: ZAI_CREATE_KEY_URL,
       keyPattern: /^[A-Za-z0-9]{20,}\.[A-Za-z0-9]{8,}$/,
       placeholder: "Paste your z.ai API key",
     },
@@ -108,7 +108,7 @@ export const PROVIDERS: Provider[] = [
     connect: {
       kind: "api-key",
       field: "kimiApiKey",
-      keyUrl: "https://www.kimi.com/code/console",
+      keyUrl: KIMI_CREATE_KEY_URL,
       keyPattern: /^sk-[A-Za-z0-9_-]{20,}$/,
       placeholder: "Paste your Kimi Code API key",
     },
@@ -123,7 +123,7 @@ export const PROVIDERS: Provider[] = [
     connect: {
       kind: "api-key",
       field: "deepseekApiKey",
-      keyUrl: "https://platform.deepseek.com/api_keys",
+      keyUrl: DEEPSEEK_CREATE_KEY_URL,
       keyPattern: /^sk-[a-f0-9]{32}$/,
       placeholder: "Paste your DeepSeek API key",
     },
@@ -139,7 +139,7 @@ export const PROVIDERS: Provider[] = [
       kind: "api-key",
       field: "moonshotApiKey",
       region: "moonshotRegion",
-      keyUrl: "https://platform.moonshot.ai/console/api-keys",
+      keyUrl: MOONSHOT_CREATE_KEY_URL,
       keyPattern: /^sk-[A-Za-z0-9]{32,}$/,
       placeholder: "Paste your Moonshot API key",
     },

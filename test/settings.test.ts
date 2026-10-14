@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { Connections } from "../src/lib/connections";
-import { toSettings } from "../src/lib/settings";
+import { startRegion, toSettings } from "../src/lib/settings";
 
 function prefs(overrides: Partial<Record<string, string>> = {}): Preferences {
   return {
@@ -11,6 +11,21 @@ function prefs(overrides: Partial<Record<string, string>> = {}): Preferences {
     ...overrides,
   } as Preferences;
 }
+
+describe("startRegion", () => {
+  it("starts a key form on the region the provider already has", () => {
+    expect(startRegion({ zaiRegion: "china" }, "zaiRegion")).toBe("china");
+    expect(startRegion({ moonshotRegion: "china" }, "moonshotRegion")).toBe("china");
+  });
+
+  it("starts on global when the provider has no region saved", () => {
+    expect(startRegion({ zaiApiKey: "key" }, "zaiRegion")).toBe("global");
+  });
+
+  it("starts on global when the key form has no region field", () => {
+    expect(startRegion({ zaiRegion: "china" }, undefined)).toBe("global");
+  });
+});
 
 describe("toSettings", () => {
   it("trims the strings it keeps", () => {

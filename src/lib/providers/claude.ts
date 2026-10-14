@@ -22,7 +22,7 @@ const KEYCHAIN_NOT_CONNECTED_HINT = "Choose Connect Claude Code from this item's
 const NOT_CONNECTED_HINT =
   "Choose Connect Claude Code from this item's actions.\n" +
   "macOS asks once for access to Claude Code's login. Choose Always Allow.\n" +
-  "As a last resort, choose Use claude.ai Session Key from this item's actions instead.";
+  "As a last resort, choose Use Claude Session Key from this item's actions instead.";
 
 const WINDOW_KEYS: [key: string, label: string][] = [
   ["five_hour", "Session"],

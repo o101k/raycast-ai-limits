@@ -33,7 +33,7 @@ Providers without credentials appear under **Not Connected**, each with its Conn
 
 ## Fallback: copy a session cookie
 
-Claude and Cursor have a fallback for when Connect can't read their login: **Use claude.ai Session Key** and **Use Cursor Session Cookie**. They need a browser cookie. This is how to copy one in Chrome or Safari:
+Claude and Cursor have a fallback for when Connect can't read their login: **Use Claude Session Key** and **Use Cursor Session Cookie**. They need a browser cookie. This is how to copy one in Chrome or Safari:
 
 1. Sign in to the site (claude.ai or cursor.com) in your browser.
 2. Open the developer tools: in Chrome, press Cmd+Option+I, then open the **Application** tab. In Safari, enable the Develop menu in Settings > Advanced, then press Cmd+Option+I.
