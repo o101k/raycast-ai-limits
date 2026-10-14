@@ -1,5 +1,6 @@
 import { Deps } from "../deps";
 import { asArray, asNumber, asRecord, asString, asTimestamp, clampPercent, requestJson, titleCase } from "../http";
+import { claudeKeychainService, readKeychainPassword } from "../keychain";
 import { Balance, ProviderError, ProviderUsage, Settings, UsageWindow } from "../types";
 
 const USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
@@ -10,13 +11,18 @@ const CLAUDE_AI = "https://claude.ai/api/organizations";
 const REFRESH_MARGIN_MS = 60_000;
 
 const OAUTH_HINT =
-  "Open Claude Code to refresh its login, or add your claude.ai session key in the extension preferences.";
+  "Open Claude Code to refresh its login, then choose Connect Claude Code from this item's actions. " +
+  "Or add your claude.ai session key in the extension preferences.";
 const SESSION_HINT =
   "Your claude.ai session key expired. Copy a fresh sessionKey cookie from claude.ai into the extension preferences.";
+const KEYCHAIN_DENIED_HINT =
+  "Choose Connect Claude Code from this item's actions again.\n" +
+  "When macOS asks for access to Claude Code's login, click Always Allow.";
+const KEYCHAIN_NOT_CONNECTED_HINT = "Choose Connect Claude Code from this item's actions to sign in.";
 const NOT_CONNECTED_HINT =
-  "Claude Code on macOS stores its login in the Keychain, which Raycast extensions can't read, so paste the claude.ai " +
-  'sessionKey cookie into the "Claude Session Key" preference: open claude.ai in a browser, Developer Tools > ' +
-  "Application (Storage in Safari/Firefox) > Cookies > https://claude.ai > copy the value of sessionKey.";
+  "Choose Connect Claude Code from this item's actions.\n" +
+  "macOS asks once for access to Claude Code's login. Choose Always Allow.\n" +
+  "As a last resort, choose Use claude.ai Session Key from this item's actions instead.";
 
 const WINDOW_KEYS: [key: string, label: string][] = [
   ["five_hour", "Session"],
@@ -40,11 +46,23 @@ interface OAuthCredential {
   rateLimitTier?: string;
 }
 
-type OAuthState = { kind: "absent" } | { kind: "invalid" } | { kind: "present"; credential: OAuthCredential };
+// Where a login was read from. The label is the source the usage shows.
+type CredentialSource = "keychain" | "file";
+const SOURCE_LABELS: Record<CredentialSource, string> = {
+  keychain: "Claude Code (Keychain)",
+  file: "Claude Code credentials",
+};
+
+type OAuthState =
+  | { kind: "absent" }
+  | { kind: "invalid"; from: CredentialSource }
+  // macOS refused to give us the Keychain item, so there is no login to read.
+  | { kind: "denied" }
+  | { kind: "present"; from: CredentialSource; credential: OAuthCredential };
 
 export async function fetchClaudeUsage(deps: Deps, settings: Settings): Promise<ProviderUsage> {
   const sessionKey = extractSessionKey(settings.claudeSessionKey);
-  const oauth = await readOAuthCredential(deps);
+  const oauth = await readOAuthCredential(deps, settings);
 
   if (oauth.kind === "present") {
     const problem = checkOAuthUsable(oauth.credential, deps.now());
@@ -55,7 +73,7 @@ export async function fetchClaudeUsage(deps: Deps, settings: Settings): Promise<
       return fallbackToSession(deps, sessionKey, problem.note);
     }
     try {
-      return await fetchWithOAuth(deps, oauth.credential);
+      return await fetchWithOAuth(deps, oauth.credential, oauth.from);
     } catch (error) {
       // Only a failed request can be retried on the web API. A usage body we can't read would fail the same way there.
       if (!sessionKey || !(error instanceof ProviderError) || (error.kind !== "auth" && error.kind !== "http")) {
@@ -65,15 +83,30 @@ export async function fetchClaudeUsage(deps: Deps, settings: Settings): Promise<
     }
   }
 
+  if (oauth.kind === "denied") {
+    if (sessionKey) {
+      return fallbackToSession(
+        deps,
+        sessionKey,
+        "macOS denied access to Claude Code's Keychain login, used claude.ai session",
+      );
+    }
+    throw new ProviderError("auth", "macOS denied access to Claude Code's login in the Keychain", KEYCHAIN_DENIED_HINT);
+  }
+
   if (sessionKey) {
     return fetchWithSession(deps, sessionKey, []);
   }
   if (oauth.kind === "invalid") {
+    const where = oauth.from === "keychain" ? "Claude Code's Keychain login" : "Claude Code's credentials file";
     throw new ProviderError(
       "parse",
-      "Claude Code's credentials file isn't valid JSON",
+      `${where} isn't valid JSON`,
       "Sign in to Claude Code again, or add your claude.ai session key in the extension preferences",
     );
+  }
+  if (settings.claudeKeychain) {
+    throw new ProviderError("not-connected", "Claude Code isn't signed in on this Mac", KEYCHAIN_NOT_CONNECTED_HINT);
   }
   throw new ProviderError("not-connected", "No Claude login found", NOT_CONNECTED_HINT);
 }
@@ -155,18 +188,38 @@ function checkOAuthUsable(credential: OAuthCredential, now: number): { message: 
   return undefined;
 }
 
-async function readOAuthCredential(deps: Deps): Promise<OAuthState> {
+async function readOAuthCredential(deps: Deps, settings: Settings): Promise<OAuthState> {
+  if (settings.claudeKeychain) {
+    // Claude Code writes a fresh login to the Keychain and can leave the credentials file next to it stale, so the
+    // Keychain is read first. A missing item, or one with no login in it, falls through to the file. A denied read does
+    // not: the file may be the stale copy, and using it would show limits for a login Claude Code has already replaced.
+    const keychain = await readKeychainPassword(deps, claudeKeychainService(deps.env.CLAUDE_CONFIG_DIR, deps.homedir));
+    if (keychain.kind === "denied") {
+      return { kind: "denied" };
+    }
+    if (keychain.kind === "found") {
+      const oauth = parseOAuthCredential(keychain.text, "keychain");
+      if (oauth.kind !== "absent") {
+        return oauth;
+      }
+    }
+  }
+
   const configDir = deps.env.CLAUDE_CONFIG_DIR || `${deps.homedir}/.claude`;
   const text = await deps.readFile(`${configDir}/.credentials.json`);
   if (text === null) {
     return { kind: "absent" };
   }
+  return parseOAuthCredential(text, "file");
+}
 
+// Parses the JSON that Claude Code stores, whether it came from the Keychain or from the credentials file.
+function parseOAuthCredential(text: string, from: CredentialSource): OAuthState {
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
   } catch {
-    return { kind: "invalid" };
+    return { kind: "invalid", from };
   }
 
   const oauth = asRecord(asRecord(parsed)?.claudeAiOauth);
@@ -176,6 +229,7 @@ async function readOAuthCredential(deps: Deps): Promise<OAuthState> {
   }
   return {
     kind: "present",
+    from,
     credential: {
       accessToken,
       expiresAt: asNumber(oauth.expiresAt),
@@ -186,7 +240,7 @@ async function readOAuthCredential(deps: Deps): Promise<OAuthState> {
   };
 }
 
-async function fetchWithOAuth(deps: Deps, credential: OAuthCredential): Promise<ProviderUsage> {
+async function fetchWithOAuth(deps: Deps, credential: OAuthCredential, from: CredentialSource): Promise<ProviderUsage> {
   const json = await requestJson(deps, USAGE_URL, {
     provider: "Claude",
     headers: {
@@ -203,7 +257,7 @@ async function fetchWithOAuth(deps: Deps, credential: OAuthCredential): Promise<
     windows: usage.windows,
     balances: usage.balances,
     notes: [],
-    source: "Claude Code credentials",
+    source: SOURCE_LABELS[from],
     fetchedAt: deps.now(),
   };
 }

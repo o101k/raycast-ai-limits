@@ -1,5 +1,6 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { fakeDeps, HOME, NOW, Route } from "../fake-deps";
+import { fakeDeps, FakeProgram, HOME, NOW, Route } from "../fake-deps";
 import { extractSessionKey, fetchClaudeUsage, parseClaudeUsage } from "../../src/lib/providers/claude";
 import { ProviderError, Settings } from "../../src/lib/types";
 
@@ -475,7 +476,192 @@ describe("fetchClaudeUsage with the claude.ai session key", () => {
 
     expect(error).toBeInstanceOf(ProviderError);
     expect(error).toMatchObject({ kind: "not-connected", message: "No Claude login found" });
-    expect((error as ProviderError).hint).toContain("sessionKey");
+    expect((error as ProviderError).hint).toContain("Connect Claude Code");
+    expect(deps.requests).toEqual([]);
+  });
+});
+
+const SECURITY = "/usr/bin/security";
+const KEYCHAIN_SERVICE = "Claude Code-credentials";
+const KEYCHAIN: Settings = { claudeKeychain: true };
+const KEYCHAIN_READ_ARGS = ["find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"];
+const KEYCHAIN_DENIED_NOTE = "macOS denied access to Claude Code's Keychain login, used claude.ai session";
+
+// Answers the `security` call that reads Claude Code's Keychain item.
+function keychainAnswer(exitCode: number, stdout = ""): FakeProgram {
+  return { file: SECURITY, respond: { exitCode, stdout, stderr: "" } };
+}
+
+describe("fetchClaudeUsage with the Claude Code Keychain login", () => {
+  it("reads the default Keychain item and labels the usage with its source", async () => {
+    const deps = fakeDeps({ routes: [oauthRoute(USAGE_JSON)] });
+    deps.programs.push(
+      keychainAnswer(0, `${oauthCredentials({ subscriptionType: "max", rateLimitTier: "default_claude_max_20x" })}\n`),
+    );
+
+    const usage = await fetchClaudeUsage(deps, KEYCHAIN);
+
+    expect(deps.runCalls).toEqual([{ file: SECURITY, args: KEYCHAIN_READ_ARGS, options: { timeoutMs: 60_000 } }]);
+    expect(deps.requests).toHaveLength(1);
+    expect(deps.requests[0].headers.authorization).toBe("Bearer oauth-token-123");
+    expect(usage).toMatchObject({ plan: "Max 20x", source: "Claude Code (Keychain)", notes: [] });
+  });
+
+  it("prefers the Keychain login over a stale credentials file", async () => {
+    const deps = fakeDeps({
+      files: { [CREDENTIALS]: oauthCredentials({ accessToken: "stale-file-token" }) },
+      routes: [oauthRoute(USAGE_JSON)],
+    });
+    deps.programs.push(keychainAnswer(0, `${oauthCredentials({})}\n`));
+
+    await fetchClaudeUsage(deps, KEYCHAIN);
+
+    expect(deps.requests[0].headers.authorization).toBe("Bearer oauth-token-123");
+  });
+
+  it("falls back to the credentials file when the Keychain has no item", async () => {
+    const deps = fakeDeps({ files: { [CREDENTIALS]: oauthCredentials({}) }, routes: [oauthRoute(USAGE_JSON)] });
+    deps.programs.push(keychainAnswer(44));
+
+    const usage = await fetchClaudeUsage(deps, KEYCHAIN);
+
+    expect(deps.runCalls).toHaveLength(1);
+    expect(deps.requests).toHaveLength(1);
+    expect(usage.source).toBe("Claude Code credentials");
+  });
+
+  it("falls back to the credentials file when the Keychain item has no login in it", async () => {
+    const deps = fakeDeps({ files: { [CREDENTIALS]: oauthCredentials({}) }, routes: [oauthRoute(USAGE_JSON)] });
+    deps.programs.push(keychainAnswer(0, `${JSON.stringify({ claudeAiOauth: { accessToken: "" } })}\n`));
+
+    const usage = await fetchClaudeUsage(deps, KEYCHAIN);
+
+    expect(usage.source).toBe("Claude Code credentials");
+  });
+
+  it("reads only the credentials file on a platform without a Keychain", async () => {
+    const deps = fakeDeps({ files: { [CREDENTIALS]: oauthCredentials({}) }, routes: [oauthRoute(USAGE_JSON)] });
+    deps.platform = "linux";
+
+    const usage = await fetchClaudeUsage(deps, KEYCHAIN);
+
+    expect(deps.runCalls).toEqual([]);
+    expect(usage.source).toBe("Claude Code credentials");
+  });
+
+  it("never runs security when the Keychain setting is off", async () => {
+    const deps = fakeDeps({ files: { [CREDENTIALS]: oauthCredentials({}) }, routes: [oauthRoute(USAGE_JSON)] });
+    deps.programs.push(keychainAnswer(0, `${oauthCredentials({ accessToken: "keychain-token" })}\n`));
+
+    const usage = await fetchClaudeUsage(deps, NO_SETTINGS);
+
+    expect(deps.runCalls).toEqual([]);
+    expect(deps.requests[0].headers.authorization).toBe("Bearer oauth-token-123");
+    expect(usage.source).toBe("Claude Code credentials");
+  });
+
+  it("does not touch the Keychain when the setting is off and nothing else is connected", async () => {
+    const deps = fakeDeps();
+
+    await expect(fetchClaudeUsage(deps, NO_SETTINGS)).rejects.toMatchObject({ kind: "not-connected" });
+    expect(deps.runCalls).toEqual([]);
+  });
+
+  it("looks up the Keychain item for CLAUDE_CONFIG_DIR by its hashed name", async () => {
+    const deps = fakeDeps({ routes: [oauthRoute(USAGE_JSON)] });
+    deps.env.CLAUDE_CONFIG_DIR = "/Volumes/work/claude";
+    deps.programs.push(keychainAnswer(0, `${oauthCredentials({})}\n`));
+
+    await fetchClaudeUsage(deps, KEYCHAIN);
+
+    const hash = createHash("sha256").update("/Volumes/work/claude").digest("hex").slice(0, 8);
+    expect(deps.runCalls[0].args).toEqual(["find-generic-password", "-s", `Claude Code-credentials-${hash}`, "-w"]);
+  });
+
+  it("decodes a Keychain password that security printed as hex", async () => {
+    const deps = fakeDeps({ routes: [oauthRoute(USAGE_JSON)] });
+    deps.programs.push(keychainAnswer(0, `${Buffer.from(oauthCredentials({})).toString("hex")}\n`));
+
+    const usage = await fetchClaudeUsage(deps, KEYCHAIN);
+
+    expect(usage.source).toBe("Claude Code (Keychain)");
+    expect(deps.requests[0].headers.authorization).toBe("Bearer oauth-token-123");
+  });
+
+  it("does not fall back to the credentials file for a Keychain item that is not JSON", async () => {
+    const deps = fakeDeps({ files: { [CREDENTIALS]: oauthCredentials({}) }, routes: [oauthRoute(USAGE_JSON)] });
+    deps.programs.push(keychainAnswer(0, "{ not json\n"));
+
+    const error = await fetchClaudeUsage(deps, KEYCHAIN).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({ kind: "parse", message: "Claude Code's Keychain login isn't valid JSON" });
+    expect(deps.requests).toEqual([]);
+  });
+
+  it("throws an auth error telling the user to allow access when macOS denies the Keychain read", async () => {
+    const deps = fakeDeps({ files: { [CREDENTIALS]: oauthCredentials({}) }, routes: [oauthRoute(USAGE_JSON)] });
+    deps.programs.push(keychainAnswer(128));
+
+    const error = await fetchClaudeUsage(deps, KEYCHAIN).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({
+      kind: "auth",
+      message: "macOS denied access to Claude Code's login in the Keychain",
+      hint: expect.stringContaining("Always Allow"),
+    });
+    expect((error as ProviderError).hint).toContain("Connect Claude Code");
+    // The file is not used even though it holds a login, because it may be the stale copy.
+    expect(deps.requests).toEqual([]);
+  });
+
+  it("falls back to the session key with a note when the Keychain read is denied", async () => {
+    const deps = fakeDeps({ routes: sessionRoutes() });
+    deps.programs.push(keychainAnswer(128));
+
+    const usage = await fetchClaudeUsage(deps, { ...WITH_SESSION, claudeKeychain: true });
+
+    expect(deps.requests.map((request) => request.url)).not.toContainEqual(
+      expect.stringContaining("api.anthropic.com"),
+    );
+    expect(usage.source).toBe("claude.ai session");
+    expect(usage.notes).toEqual([KEYCHAIN_DENIED_NOTE]);
+  });
+
+  it("treats a security run that can't start or times out as denied", async () => {
+    const deps = fakeDeps({ routes: sessionRoutes() });
+    deps.programs.push({
+      file: SECURITY,
+      respond: () => {
+        throw new Error("security timed out");
+      },
+    });
+
+    const usage = await fetchClaudeUsage(deps, { ...WITH_SESSION, claudeKeychain: true });
+
+    expect(usage.notes).toEqual([KEYCHAIN_DENIED_NOTE]);
+  });
+
+  it("falls back to the session key when the Keychain token is expired", async () => {
+    const deps = fakeDeps({ routes: [oauthRoute(USAGE_JSON), ...sessionRoutes()] });
+    deps.programs.push(keychainAnswer(0, `${oauthCredentials({ expiresAt: EXPIRED })}\n`));
+
+    const usage = await fetchClaudeUsage(deps, { ...WITH_SESSION, claudeKeychain: true });
+
+    expect(deps.requests.map((request) => request.url)).not.toContainEqual(
+      expect.stringContaining("api.anthropic.com"),
+    );
+    expect(usage.source).toBe("claude.ai session");
+    expect(usage.notes).toEqual(["Claude Code token expired, used claude.ai session"]);
+  });
+
+  it("is not-connected with the Connect hint when the setting is on and no login exists", async () => {
+    const deps = fakeDeps();
+    deps.programs.push(keychainAnswer(44));
+
+    const error = await fetchClaudeUsage(deps, KEYCHAIN).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({ kind: "not-connected", message: "Claude Code isn't signed in on this Mac" });
+    expect((error as ProviderError).hint).toContain("Connect Claude Code");
     expect(deps.requests).toEqual([]);
   });
 });
