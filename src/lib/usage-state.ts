@@ -27,13 +27,13 @@ function isCoolingFailure(failure: Failure | undefined, now: number): failure is
 }
 
 export function isCoolingDown(state: ProviderState, now: number): boolean {
-  return isCoolingFailure(state.failure, now);
+  return isCoolingFailure(state.cooldown, now);
 }
 
 // A provider with no saved result is still loading, so the spinner shows while it is fetched. Providers with a saved
 // result show it at once, and become loading only when they are refreshed. A provider still cooling down from an
-// earlier session starts with its failure and its saved result, and is not loading, since it won't be fetched until
-// the cooldown ends.
+// earlier session is not loading, since it won't be fetched until the cooldown ends. It shows its saved result, or its
+// failure when there is none.
 export function initialStates(
   ids: readonly ProviderId[],
   cached: Cached,
@@ -44,7 +44,12 @@ export function initialStates(
   for (const id of ids) {
     const cooldown = cooldowns[id];
     if (isCoolingFailure(cooldown, now)) {
-      states[id] = { loading: false, usage: cached[id], failure: cooldown };
+      states[id] = {
+        loading: false,
+        usage: cached[id],
+        cooldown,
+        failure: cached[id] === undefined ? cooldown : undefined,
+      };
     } else {
       states[id] = { loading: cached[id] === undefined, usage: cached[id] };
     }
@@ -56,11 +61,22 @@ export function initialStates(
 export function cooldownsOf(states: States, now: number): Partial<Record<ProviderId, Failure>> {
   const cooldowns: Partial<Record<ProviderId, Failure>> = {};
   for (const [id, state] of Object.entries(states) as [ProviderId, ProviderState][]) {
-    if (isCoolingFailure(state.failure, now)) {
-      cooldowns[id] = state.failure;
+    if (isCoolingFailure(state.cooldown, now)) {
+      cooldowns[id] = state.cooldown;
     }
   }
   return cooldowns;
+}
+
+// When each cooling provider's cooldown ends, in epoch milliseconds. The view schedules its deferred fetch for these.
+export function cooldownEnds(states: States, now: number): Partial<Record<ProviderId, number>> {
+  const ends: Partial<Record<ProviderId, number>> = {};
+  for (const [id, state] of Object.entries(states) as [ProviderId, ProviderState][]) {
+    if (isCoolingDown(state, now) && state.cooldown?.retryAt !== undefined) {
+      ends[id] = state.cooldown.retryAt;
+    }
+  }
+  return ends;
 }
 
 // Which providers to fetch.
@@ -110,7 +126,9 @@ export function applySuccess(states: States, cached: Cached, id: ProviderId, usa
 }
 
 // A "not-connected" failure means the credentials were removed, so the saved numbers are dropped from the state and the
-// cache. Other failures keep the saved numbers and show the failure next to them.
+// cache. A 429 keeps the saved numbers on screen with no failure shown, and only records the cooldown, so the user
+// never sees a rate-limit error while older results exist. With no saved numbers the 429 is shown as the failure. Other
+// failures keep the saved numbers and show the failure next to them.
 export function applyFailure(states: States, cached: Cached, id: ProviderId, failure: Failure): Transition {
   if (failure.kind === "not-connected") {
     const remaining = { ...cached };
@@ -118,6 +136,16 @@ export function applyFailure(states: States, cached: Cached, id: ProviderId, fai
     return {
       states: { ...states, [id]: { loading: false, failure } },
       cached: remaining,
+    };
+  }
+  if (failure.retryAt !== undefined) {
+    const usage = states[id].usage;
+    return {
+      states: {
+        ...states,
+        [id]: { loading: false, usage, cooldown: failure, failure: usage === undefined ? failure : undefined },
+      },
+      cached,
     };
   }
   return {

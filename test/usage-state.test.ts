@@ -4,8 +4,10 @@ import {
   applyFailure,
   applySuccess,
   Cached,
+  cooldownEnds,
   cooldownsOf,
   FRESH_MS,
+  isCoolingDown,
   initialStates,
   isNotConnected,
   MIN_FORCED_MS,
@@ -33,9 +35,11 @@ function usage(id: "claude" | "codex" | "copilot", fetchedAt = NOW): ProviderUsa
 
 const notConnected = { kind: "not-connected" as const, message: "No credentials", hint: "Sign in" };
 
-// A provider that answered 429 and asked to wait until `retryAt`, with its saved result when given.
+// A provider that answered 429 and asked to wait until `retryAt`, as applyFailure leaves it. The cooldown is kept
+// apart, and the failure is shown only when there is no saved result.
 function rateLimited(retryAt: number, saved?: ProviderUsage): ProviderState {
-  return { loading: false, usage: saved, failure: { kind: "http", message: "rate limited", retryAt } };
+  const cooldown = { kind: "http" as const, message: "rate limited", retryAt };
+  return { loading: false, usage: saved, cooldown, failure: saved === undefined ? cooldown : undefined };
 }
 
 describe("initialStates", () => {
@@ -55,8 +59,20 @@ describe("initialStates", () => {
     const cached: Cached = { claude: usage("claude", NOW - 10 * 60_000) };
     const cooldown = { kind: "http" as const, message: "rate limited", retryAt: NOW + 60_000 };
     const states = initialStates(IDS, cached, { claude: cooldown }, NOW);
-    expect(states.claude).toEqual({ loading: false, usage: cached.claude, failure: cooldown });
+    expect(states.claude).toEqual({ loading: false, usage: cached.claude, cooldown });
     expect(states.codex.loading).toBe(true);
+  });
+
+  it("shows no failure for an active cooldown when there is saved usage", () => {
+    const cooldown = { kind: "http" as const, message: "rate limited", retryAt: NOW + 60_000 };
+    const states = initialStates(IDS, { claude: usage("claude") }, { claude: cooldown }, NOW);
+    expect(states.claude.failure).toBeUndefined();
+  });
+
+  it("shows the failure for an active cooldown when there is no saved usage", () => {
+    const cooldown = { kind: "http" as const, message: "rate limited", retryAt: NOW + 60_000 };
+    const states = initialStates(IDS, {}, { claude: cooldown }, NOW);
+    expect(states.claude).toEqual({ loading: false, usage: undefined, cooldown, failure: cooldown });
   });
 
   it("ignores a cooldown that has ended", () => {
@@ -124,6 +140,12 @@ describe("providersToRefresh", () => {
     expect(providersToRefresh(states, ALL, NOW, { force: true })).toEqual(["codex", "copilot"]);
   });
 
+  it("skips a provider whose cooldown is hidden behind its saved usage", () => {
+    const states: States = { ...statesWith({}), claude: rateLimited(NOW + 60_000, usage("claude", NOW - 10 * 60_000)) };
+    expect(states.claude.failure).toBeUndefined();
+    expect(providersToRefresh(states, ALL, NOW, { force: true })).toEqual(["codex", "copilot"]);
+  });
+
   it("skips a provider in cooldown that has no saved data", () => {
     const states: States = { ...statesWith({}), claude: rateLimited(NOW + 60_000) };
     expect(providersToRefresh(states, ALL, NOW, { force: true })).toEqual(["codex", "copilot"]);
@@ -177,12 +199,63 @@ describe("startRefresh", () => {
   });
 });
 
+describe("applyFailure with a 429", () => {
+  const cooling = { kind: "http" as const, message: "rate limited", retryAt: NOW + 60_000 };
+
+  it("keeps the saved usage on screen with no failure, records the cooldown, and leaves the cache unchanged", () => {
+    const saved = usage("claude", NOW - 10 * 60_000);
+    const cached: Cached = { claude: saved };
+    const result = applyFailure(initialStates(IDS, cached), cached, "claude", cooling);
+    expect(result.states.claude).toEqual({ loading: false, usage: saved, cooldown: cooling });
+    expect(result.states.claude.failure).toBeUndefined();
+    expect(result.cached).toBe(cached);
+  });
+
+  it("shows the failure and records the cooldown when there is no saved usage", () => {
+    const result = applyFailure(initialStates(IDS, {}), {}, "claude", cooling);
+    expect(result.states.claude).toEqual({ loading: false, usage: undefined, cooldown: cooling, failure: cooling });
+  });
+
+  it("clears the cooldown when a later refresh succeeds", () => {
+    const saved = usage("claude", NOW - 10 * 60_000);
+    const limited = applyFailure(initialStates(IDS, { claude: saved }), { claude: saved }, "claude", cooling);
+    const result = applySuccess(limited.states, limited.cached, "claude", usage("claude", NOW));
+    expect(result.states.claude.cooldown).toBeUndefined();
+    expect(result.states.claude.failure).toBeUndefined();
+  });
+
+  it("keeps the cooldown through startRefresh", () => {
+    const saved = usage("claude", NOW - 10 * 60_000);
+    const limited = applyFailure(initialStates(IDS, { claude: saved }), { claude: saved }, "claude", cooling);
+    expect(startRefresh(limited.states, ["claude"]).claude.cooldown).toEqual(cooling);
+  });
+});
+
+describe("isCoolingDown", () => {
+  it("reads the cooldown, not the failure", () => {
+    const retry = { kind: "http" as const, message: "rate limited", retryAt: NOW + 60_000 };
+    expect(isCoolingDown({ loading: false, cooldown: retry }, NOW)).toBe(true);
+    expect(isCoolingDown({ loading: false, failure: retry }, NOW)).toBe(false);
+  });
+});
+
+describe("cooldownEnds", () => {
+  it("maps each provider still cooling down to the time its cooldown ends", () => {
+    const states: States = {
+      ...initialStates(IDS, {}),
+      claude: rateLimited(NOW + 60_000),
+      codex: rateLimited(NOW - 1),
+    };
+    expect(cooldownEnds(states, NOW)).toEqual({ claude: NOW + 60_000 });
+  });
+});
+
 describe("cooldownsOf", () => {
   it("returns the failures still cooling down, and leaves out expired ones and other failures", () => {
     const cooling = { kind: "http" as const, message: "rate limited", retryAt: NOW + 60_000 };
     const states: States = {
       ...initialStates(IDS, {}),
-      claude: { loading: false, failure: cooling },
+      claude: { loading: false, cooldown: cooling },
       codex: rateLimited(NOW - 1),
       copilot: { loading: false, failure: notConnected },
     };

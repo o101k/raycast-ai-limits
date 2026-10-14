@@ -26,7 +26,10 @@ export interface Failure {
 export interface ProviderState {
   loading: boolean;
   usage?: ProviderUsage;
+  // Shown to the user. After a 429 it is set only when there is no saved usage, since saved numbers show as they are.
   failure?: Failure;
+  // The 429 still cooling down, kept so refreshes wait until its retryAt. Not shown on its own, see `failure`.
+  cooldown?: Failure;
 }
 
 const MINUTE_MS = 60_000;

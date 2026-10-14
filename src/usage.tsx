@@ -48,6 +48,7 @@ import {
   applyFailure,
   applySuccess,
   Cached,
+  cooldownEnds,
   cooldownsOf,
   initialStates,
   isNotConnected,
@@ -167,7 +168,10 @@ function useUsage(onKeychainDenied: () => void) {
     [commit, onKeychainDenied],
   );
 
-  return { states, refresh };
+  // Read from the store, not the render's states, so a timer or callback sees the latest cooldowns.
+  const readCooldownEnds = useCallback(() => cooldownEnds(storeRef.current.states, Date.now()), []);
+
+  return { states, refresh, readCooldownEnds };
 }
 
 const TONE_COLORS: Record<Tone, Color.ColorLike> = {
@@ -490,7 +494,50 @@ export default function Command() {
   const onKeychainDenied = useCallback(() => {
     void saveConnections({ claudeKeychain: false }).then(updateConnections, () => undefined);
   }, [updateConnections]);
-  const { states, refresh } = useUsage(onKeychainDenied);
+  const { states, refresh, readCooldownEnds } = useUsage(onKeychainDenied);
+
+  // A refresh asked for during a cooldown is not fetched then, and the saved numbers stay on screen. This timer runs
+  // that fetch once the provider allows the next request, so the user doesn't have to press Refresh again. Each entry
+  // keeps the retryAt it was set for, so a cooldown that has since changed or ended is replaced or cleared.
+  const retryTimersRef = useRef(new Map<ProviderId, { retryAt: number; timer: ReturnType<typeof setTimeout> }>());
+  function scheduleCooldownRefreshes() {
+    // A refresh that settles after the command closed must not start timers that nothing would clear.
+    if (closeRef.current?.signal.aborted) {
+      return;
+    }
+    const timers = retryTimersRef.current;
+    const ends = readCooldownEnds();
+    for (const [id, entry] of timers) {
+      if (ends[id] !== entry.retryAt) {
+        clearTimeout(entry.timer);
+        timers.delete(id);
+      }
+    }
+    for (const id of Object.keys(ends) as ProviderId[]) {
+      const retryAt = ends[id];
+      if (retryAt === undefined || timers.has(id)) {
+        continue;
+      }
+      // One second after retryAt, so the timer never fires before the provider's own window has passed.
+      const timer = setTimeout(
+        () => {
+          timers.delete(id);
+          void refresh(currentSettings(), { force: true, only: [id] }).then(scheduleCooldownRefreshes);
+        },
+        retryAt - Date.now() + 1000,
+      );
+      timers.set(id, { retryAt, timer });
+    }
+  }
+  useEffect(() => {
+    const timers = retryTimersRef.current;
+    return () => {
+      for (const { timer } of timers.values()) {
+        clearTimeout(timer);
+      }
+      timers.clear();
+    };
+  }, []);
 
   // The first refresh waits for the GitHub token and the saved connections, and then runs once.
   const startedRef = useRef(false);
@@ -498,15 +545,16 @@ export default function Command() {
   useEffect(() => {
     if (ready && !startedRef.current) {
       startedRef.current = true;
-      void refresh(settings, { force: false });
+      void refresh(settings, { force: false }).then(() => scheduleCooldownRefreshes());
     }
   }, [ready, refresh, settings]);
 
   // Refreshes providers with the latest token and connections. Without `only`, that is every provider, subject to the
   // 30-second floor and cooldowns in providersToRefresh. `only` names the providers whose login just changed, which are
-  // fetched at once.
-  function refreshWith(only?: ProviderId[]) {
-    return refresh(currentSettings(), { force: true, only });
+  // fetched at once. A provider still cooling down gets its deferred fetch scheduled once this settles.
+  async function refreshWith(only?: ProviderId[]) {
+    await refresh(currentSettings(), { force: true, only });
+    scheduleCooldownRefreshes();
   }
 
   // Signs in with GitHub. `signOutFirst` removes the stored token before the sign-in, because the sign-in hands back
