@@ -100,8 +100,9 @@ export function isFallbackOverridden(providerId: ProviderId, preferences: Settin
 export interface ConnectUi {
   // Shows what Connect is doing now, such as "Finish signing in in Terminal".
   progress(title: string, message?: string): void;
-  // Stores credentials the extension keeps itself (LocalStorage in the real UI).
-  save(patch: Partial<Connections>): Promise<void>;
+  // Stores credentials the extension keeps itself (LocalStorage in the real UI). Resolves to the connections after the
+  // save.
+  save(patch: Partial<Connections>): Promise<Connections>;
   // Fetches this provider's usage with the latest saved connections, and says whether the login works.
   verify(): Promise<LoginCheck>;
   // Aborted when the user leaves the command or Disconnects, which stops any waiting and any saving.
@@ -161,10 +162,12 @@ async function connectClaude(deps: Deps, ui: ConnectUi): Promise<ConnectOutcome>
     return STOPPED;
   }
   // The folder is saved with the setting, before any login is read, so the reads below and every later refresh use it.
-  await ui.save({ claudeKeychain: true, claudeConfigDir: env.claudeConfigDir ?? "" });
+  // An undefined folder keeps the one saved before, since the shell couldn't be asked.
+  const saved = await ui.save({ claudeKeychain: true, claudeConfigDir: env.claudeConfigDir });
   ui.progress("Connecting Claude Code", "If macOS asks for access to Claude Code's login, choose Always Allow");
 
-  const configDir = env.claudeConfigDir || deps.env.CLAUDE_CONFIG_DIR;
+  // The same folder claude.ts reads from: the saved one, else the extension's environment.
+  const configDir = saved.claudeConfigDir || deps.env.CLAUDE_CONFIG_DIR;
   // The marker comes from the item's attributes, which never open macOS's access dialog.
   const before = await readClaudeMarker(deps, configDir);
   // With no login there is nothing to verify, so the sign-in starts at once.
@@ -231,7 +234,7 @@ async function signInClaude(
 // credentials file is the marker when there is no item, which is where claude.ts reads the login then. An item whose date
 // can't be read gives no marker, so nothing is compared.
 async function readClaudeMarker(deps: Deps, configDir: string | undefined): Promise<string | null> {
-  const item = await readKeychainItemDate(deps, claudeKeychainService(configDir, deps.homedir));
+  const item = await readKeychainItemDate(deps, claudeKeychainService(configDir));
   if (item.kind === "found") {
     return item.modified;
   }
@@ -268,9 +271,11 @@ async function connectCodex(deps: Deps, ui: ConnectUi): Promise<ConnectOutcome> 
   if (ui.signal?.aborted) {
     return STOPPED;
   }
-  // The folder is saved before the login is read, so the read below and later refreshes use the same folder.
-  await ui.save({ codexHome: env.codexHome ?? "" });
-  const codexHome = env.codexHome || deps.env.CODEX_HOME;
+  // The folder is saved before the login is read, so the read below and later refreshes use the same folder. An
+  // undefined folder keeps the one saved before, since the shell couldn't be asked.
+  const saved = await ui.save({ codexHome: env.codexHome });
+  // The same folder codex.ts reads from: the saved one, else the extension's environment.
+  const codexHome = saved.codexHome || deps.env.CODEX_HOME;
   const before = await readCodexLogin(deps, codexHome);
   // A Connect stopped while the login was read doesn't verify it.
   if (ui.signal?.aborted) {

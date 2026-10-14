@@ -72,7 +72,7 @@ describe("resolveUserEnv", () => {
     });
   });
 
-  it("reads the folders the same way from bash, zsh and fish, and leaves them unset when the shell has none", async () => {
+  it("reads the folders the same way from bash, zsh and fish, and gives an empty string for one the shell doesn't set", async () => {
     for (const shell of ["/bin/bash", "/bin/zsh", "/usr/local/bin/fish"]) {
       const set = fakeDeps();
       set.env.SHELL = shell;
@@ -82,12 +82,11 @@ describe("resolveUserEnv", () => {
       });
       expect(await resolveUserEnv(set)).toMatchObject({ claudeConfigDir: "/work/claude", codexHome: "/work/codex" });
 
+      // The shell answered, so "" tells Connect to clear a folder saved before.
       const unset = fakeDeps();
       unset.env.SHELL = shell;
       unset.programs.push({ file: shell, respond: { exitCode: 0, stdout: shellOutput("/usr/bin"), stderr: "" } });
-      const env = await resolveUserEnv(unset);
-      expect(env.claudeConfigDir).toBeUndefined();
-      expect(env.codexHome).toBeUndefined();
+      expect(await resolveUserEnv(unset)).toMatchObject({ claudeConfigDir: "", codexHome: "" });
     }
   });
 
@@ -142,7 +141,7 @@ describe("resolveUserEnv", () => {
     );
   });
 
-  it("sets no folder when the shell fails, so the extension's own environment decides", async () => {
+  it("leaves both folders undefined when the shell fails, so a folder saved before is kept", async () => {
     const deps = fakeDeps();
     deps.env.CLAUDE_CONFIG_DIR = "/process/claude";
     deps.env.CODEX_HOME = "/process/codex";
@@ -157,21 +156,27 @@ describe("resolveUserEnv", () => {
     expect(env.codexHome).toBeUndefined();
   });
 
-  it("falls back to the process PATH when the shell can't be started", async () => {
+  it("falls back to the process PATH when the shell can't be started, with both folders undefined", async () => {
     const deps = fakeDeps();
     deps.env.PATH = "/custom/bin:/usr/bin";
 
-    expect((await resolveUserEnv(deps)).path).toBe(
-      `/custom/bin:/usr/bin:${HOME}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/bin`,
-    );
+    const env = await resolveUserEnv(deps);
+
+    expect(env.path).toBe(`/custom/bin:/usr/bin:${HOME}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/bin`);
+    expect(env.claudeConfigDir).toBeUndefined();
+    expect(env.codexHome).toBeUndefined();
   });
 
-  it("falls back to the process PATH when the output has no marker", async () => {
+  it("falls back to the process PATH when the output has no marker, with both folders undefined", async () => {
     const deps = fakeDeps();
     deps.env.PATH = "/custom/bin";
     deps.programs.push({ file: "/bin/zsh", respond: { exitCode: 0, stdout: "/opt/x/bin", stderr: "" } });
 
-    expect((await resolveUserEnv(deps)).path).toBe(`/custom/bin:${APPENDED}`);
+    const env = await resolveUserEnv(deps);
+
+    expect(env.path).toBe(`/custom/bin:${APPENDED}`);
+    expect(env.claudeConfigDir).toBeUndefined();
+    expect(env.codexHome).toBeUndefined();
   });
 
   it("appends the well-known directories, including ~/.local/bin, when the PATH lacks them", async () => {

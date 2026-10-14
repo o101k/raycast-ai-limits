@@ -9,21 +9,41 @@ const READ_ARGS = ["find-generic-password", "-s", DEFAULT_SERVICE, "-w"];
 const DATE_ARGS = ["find-generic-password", "-s", DEFAULT_SERVICE];
 const LOGIN_JSON = '{"claudeAiOauth":{"accessToken":"oauth-token-123"}}';
 
+// The first 8 hex characters of the SHA-256 of a value, which is how Claude Code names the item for a folder.
+function hashedService(value: string): string {
+  return `${DEFAULT_SERVICE}-${createHash("sha256").update(value).digest("hex").slice(0, 8)}`;
+}
+
 describe("claudeKeychainService", () => {
-  it("uses the plain name for the default folder, with or without a trailing slash", () => {
-    expect(claudeKeychainService(undefined, HOME)).toBe(DEFAULT_SERVICE);
-    expect(claudeKeychainService(`${HOME}/.claude`, HOME)).toBe(DEFAULT_SERVICE);
-    expect(claudeKeychainService(`${HOME}/.claude/`, HOME)).toBe(DEFAULT_SERVICE);
+  it("uses the plain name when CLAUDE_CONFIG_DIR is unset", () => {
+    expect(claudeKeychainService(undefined)).toBe(DEFAULT_SERVICE);
   });
 
-  it("treats an empty CLAUDE_CONFIG_DIR as the default folder", () => {
-    expect(claudeKeychainService("", HOME)).toBe(DEFAULT_SERVICE);
+  it("uses the plain name when CLAUDE_CONFIG_DIR is empty", () => {
+    expect(claudeKeychainService("")).toBe(DEFAULT_SERVICE);
+  });
+
+  it("hashes the default folder when CLAUDE_CONFIG_DIR is set to it, since Claude Code hashes any value it is set to", () => {
+    expect(claudeKeychainService(`${HOME}/.claude`)).toBe(hashedService(`${HOME}/.claude`));
+    expect(claudeKeychainService(`${HOME}/.claude`)).not.toBe(DEFAULT_SERVICE);
+  });
+
+  it("hashes a trailing slash as part of the value, so it gives a different name from the same folder without one", () => {
+    expect(claudeKeychainService(`${HOME}/.claude/`)).toBe(hashedService(`${HOME}/.claude/`));
+    expect(claudeKeychainService(`${HOME}/.claude/`)).not.toBe(claudeKeychainService(`${HOME}/.claude`));
   });
 
   it("adds the first 8 hex characters of the SHA-256 of the path for any other folder", () => {
-    const hash = createHash("sha256").update("/Volumes/work/claude").digest("hex").slice(0, 8);
+    expect(claudeKeychainService("/Volumes/work/claude")).toBe(hashedService("/Volumes/work/claude"));
+  });
 
-    expect(claudeKeychainService("/Volumes/work/claude", HOME)).toBe(`${DEFAULT_SERVICE}-${hash}`);
+  it("gives the same name for a path with decomposed and composed characters, since Claude Code hashes NFC", () => {
+    const decomposed = "/Volumes/café/claude";
+    const composed = "/Volumes/café/claude";
+
+    expect(decomposed).not.toBe(composed);
+    expect(claudeKeychainService(decomposed)).toBe(claudeKeychainService(composed));
+    expect(claudeKeychainService(composed)).toBe(hashedService(composed));
   });
 });
 

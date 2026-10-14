@@ -457,9 +457,13 @@ export default function Command() {
   }
 
   // macOS refused the Keychain read during a refresh. The setting is turned off so later refreshes don't ask again, and
-  // choosing Connect turns it on again. A Claude Connect that is running is left alone: its own verify and sign-in
-  // decide its outcome.
+  // choosing Connect turns it on again. A Claude Connect that is running is left alone, since its own verify turns the
+  // setting off when macOS refuses, and this would only save over that.
   const onKeychainDenied = useCallback(() => {
+    const running = connectAbortsRef.current.get("claude");
+    if (running && !running.signal.aborted) {
+      return;
+    }
     void saveConnections({ claudeKeychain: false }).then(updateConnections, () => undefined);
   }, [updateConnections]);
   const { states, refresh } = useUsage(onKeychainDenied);
@@ -522,7 +526,11 @@ export default function Command() {
         toast.title = title;
         toast.message = message;
       },
-      save: async (patch) => updateConnections(await saveConnections(patch)),
+      save: async (patch) => {
+        const next = await saveConnections(patch);
+        updateConnections(next);
+        return next;
+      },
       verify: () => checkLogin(provider, verifySettings(method, currentSettings())),
       signal,
     }).catch((error: unknown): ConnectOutcome => ({

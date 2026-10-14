@@ -35,7 +35,9 @@ export const CLI_SIGN_IN = {
 
 export const CURSOR_BUNDLE_ID = "com.todesktop.230313mzl4w4u92";
 
-// What the user's shell sets for the CLIs. Each folder is undefined when the shell doesn't set it.
+// What the user's shell sets for the CLIs. Each folder has three states, which Connect saves as they are: a path when
+// the shell sets it, "" when the shell answered and doesn't set it (so a folder saved before is cleared), and undefined
+// when the shell couldn't be asked (so a folder saved before is kept).
 export interface UserEnv {
   // The PATH a Terminal window on this Mac would have.
   path: string;
@@ -46,7 +48,7 @@ export interface UserEnv {
 // The PATH a Terminal window on this Mac would have, and the config folders the user's shell sets. Raycast starts
 // extensions with a minimal PATH, which leaves out Homebrew and npm installs, and its environment rarely has
 // CLAUDE_CONFIG_DIR or CODEX_HOME. So the login shell is asked for all three. When that fails, the process PATH is
-// used, and no folder is set, so the extension's own environment decides.
+// used and both folders are undefined, so nothing saved is changed and the extension's own environment decides.
 export async function resolveUserEnv(deps: Deps): Promise<UserEnv> {
   const shell = await loginShellValues(deps);
   const parts = [...(shell?.path ?? deps.env.PATH ?? "").split(":"), `${deps.homedir}/.local/bin`, ...WELL_KNOWN_DIRS];
@@ -54,8 +56,8 @@ export async function resolveUserEnv(deps: Deps): Promise<UserEnv> {
   // directory the login shell already lists keeps its place and the well-known ones are only added when missing.
   return {
     path: [...new Set(parts.filter((part) => part !== ""))].join(":"),
-    claudeConfigDir: nonEmpty(shell?.claudeConfigDir),
-    codexHome: nonEmpty(shell?.codexHome),
+    claudeConfigDir: shell?.claudeConfigDir,
+    codexHome: shell?.codexHome,
   };
 }
 
@@ -66,7 +68,7 @@ interface LoginShellValues {
 }
 
 // Returns what the login shell prints between the markers, or undefined when the shell fails or prints no markers, so
-// the caller can fall back.
+// the caller can fall back. The folders are trimmed, so an empty one means the shell doesn't set it.
 async function loginShellValues(deps: Deps): Promise<LoginShellValues | undefined> {
   const shell = loginShell(deps.env.SHELL);
   const command = shell.endsWith("/fish") ? FISH_ENV_COMMAND : ENV_COMMAND;
@@ -76,16 +78,10 @@ async function loginShellValues(deps: Deps): Promise<LoginShellValues | undefine
       return undefined;
     }
     const match = ENV_PATTERN.exec(result.stdout);
-    return match ? { path: match[1], claudeConfigDir: match[2], codexHome: match[3] } : undefined;
+    return match ? { path: match[1], claudeConfigDir: match[2].trim(), codexHome: match[3].trim() } : undefined;
   } catch {
     return undefined;
   }
-}
-
-// A value the shell printed, trimmed. An empty one means the shell doesn't set it.
-function nonEmpty(value: string | undefined): string | undefined {
-  const trimmed = value?.trim();
-  return trimmed ? trimmed : undefined;
 }
 
 function loginShell(shell: string | undefined): string {

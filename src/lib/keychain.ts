@@ -21,14 +21,15 @@ export type KeychainRead =
   // Not macOS, so there is no Keychain to read.
   | { kind: "unsupported" };
 
-// The name of the Keychain item Claude Code uses for a config folder. The default folder keeps the plain name. Any other
-// folder gets a suffix from a short hash of its path, so each folder has its own login. An empty CLAUDE_CONFIG_DIR counts
-// as unset, as it does for the credentials file.
-export function claudeKeychainService(configDir: string | undefined, homedir: string): string {
-  if (!configDir || configDir.replace(/\/+$/, "") === `${homedir}/.claude`) {
+// The name of the Keychain item Claude Code uses for its config folder. Only an unset or empty CLAUDE_CONFIG_DIR keeps
+// the plain name. Any other value, even the default folder, gets a suffix from a short hash of the value as it was
+// given. The folder is not resolved or trimmed first, since Claude Code hashes the raw value. The hash is taken of the
+// NFC form, which is what Claude Code hashes, so a path with decomposed characters finds the same item.
+export function claudeKeychainService(configDir: string | undefined): string {
+  if (!configDir) {
     return DEFAULT_SERVICE;
   }
-  const hash = createHash("sha256").update(configDir).digest("hex").slice(0, 8);
+  const hash = createHash("sha256").update(configDir.normalize("NFC")).digest("hex").slice(0, 8);
   return `${DEFAULT_SERVICE}-${hash}`;
 }
 

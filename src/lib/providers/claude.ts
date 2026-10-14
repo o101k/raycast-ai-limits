@@ -218,7 +218,7 @@ async function readOAuthCredential(deps: Deps, settings: Settings): Promise<OAut
     // Claude Code writes a fresh login to the Keychain and can leave the credentials file next to it stale, so the
     // Keychain is read first. A missing item, or one with no login in it, falls through to the file. A denied read does
     // not: the file may be the stale copy, and using it would show limits for a login Claude Code has already replaced.
-    const keychain = await readKeychainPassword(deps, claudeKeychainService(configDir, deps.homedir));
+    const keychain = await readKeychainPassword(deps, claudeKeychainService(configDir));
     if (keychain.kind === "denied") {
       return { kind: "denied" };
     }

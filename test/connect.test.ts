@@ -10,7 +10,7 @@ import {
   LoginCheck,
   loginCheckFromError,
 } from "../src/lib/connect";
-import { Connections } from "../src/lib/connections";
+import { Connections, mergeConnections } from "../src/lib/connections";
 import { RunResult } from "../src/lib/deps";
 import { claudeKeychainService } from "../src/lib/keychain";
 import { fetchClaudeUsage } from "../src/lib/providers/claude";
@@ -111,15 +111,19 @@ function withTools(
   return deps;
 }
 
-// The UI side of Connect. Saved patches are kept in order, and progress calls are recorded by title. By default the
-// saved login is taken to work, so a test sets `verify` when it means a rejected one.
-function testUi(overrides: Partial<ConnectUi> = {}) {
+// The UI side of Connect. Saved patches are kept in order, and progress calls are recorded by title. Each save merges
+// into `stored`, as the real UI does, and returns the result. By default the saved login is taken to work, so a test
+// sets `verify` when it means a rejected one.
+function testUi(overrides: Partial<ConnectUi> = {}, stored: Connections = {}) {
   const saved: Partial<Connections>[] = [];
   const progress = vi.fn();
+  let connections = stored;
   const ui: ConnectUi = {
     progress,
     save: async (patch) => {
       saved.push(patch);
+      connections = mergeConnections(connections, patch);
+      return connections;
     },
     verify: async () => "ok",
     // A wait only happens when the login hasn't changed yet. A test that gets here without a clock to move would wait
@@ -129,7 +133,7 @@ function testUi(overrides: Partial<ConnectUi> = {}) {
     },
     ...overrides,
   };
-  return { ui, progress, saved };
+  return { ui, progress, saved, connections: () => connections };
 }
 
 // Replaces the clock with one that only moves when a wait sleeps. A poll that never succeeds then ends at its timeout
@@ -245,7 +249,7 @@ describe("connectLocal for Claude Code on macOS", () => {
     expect(deps.runCalls.find((call) => call.file === SECURITY)?.args).toEqual([
       "find-generic-password",
       "-s",
-      claudeKeychainService("/work/claude", HOME),
+      claudeKeychainService("/work/claude"),
     ]);
   });
 
@@ -454,11 +458,44 @@ describe("connectLocal for Claude Code on macOS", () => {
     expect(deps.runCalls.find((call) => call.file === SECURITY)?.args).toEqual([
       "find-generic-password",
       "-s",
-      claudeKeychainService("/work/shell-claude", HOME),
+      claudeKeychainService("/work/shell-claude"),
     ]);
     expect(terminalScript(deps)).toContain(
       `do script "'/usr/bin/env' 'CLAUDE_CONFIG_DIR=/work/shell-claude' '${CLAUDE_BIN}' 'auth' 'login'"`,
     );
+  });
+
+  it("keeps the folder saved before when the login shell can't be asked, and reads the Keychain item for that folder", async () => {
+    const deps = fakeDeps();
+    deps.programs.push({ file: SHELL, respond: { exitCode: 1, stdout: "", stderr: "boom" } });
+    deps.env.CLAUDE_CONFIG_DIR = "/work/env-claude";
+    keychainAttributes(deps, ITEM);
+    const { ui, saved, connections } = testUi({}, { claudeConfigDir: "/work/saved-claude" });
+
+    expect(await connectLocal(deps, CLAUDE, ui)).toEqual({ kind: "connected" });
+    expect(saved).toEqual([{ claudeKeychain: true, claudeConfigDir: undefined }]);
+    expect(connections()).toEqual({ claudeKeychain: true, claudeConfigDir: "/work/saved-claude" });
+    expect(deps.runCalls.find((call) => call.file === SECURITY)?.args).toEqual([
+      "find-generic-password",
+      "-s",
+      claudeKeychainService("/work/saved-claude"),
+    ]);
+  });
+
+  it("clears the folder saved before when the login shell answers that it isn't set, and uses the extension's folder", async () => {
+    const deps = withTools(fakeDeps(), [CLAUDE_BIN]);
+    deps.env.CLAUDE_CONFIG_DIR = "/work/env-claude";
+    keychainAttributes(deps, ITEM);
+    const { ui, saved, connections } = testUi({}, { claudeConfigDir: "/work/saved-claude" });
+
+    expect(await connectLocal(deps, CLAUDE, ui)).toEqual({ kind: "connected" });
+    expect(saved).toEqual([{ claudeKeychain: true, claudeConfigDir: "" }]);
+    expect(connections()).toEqual({ claudeKeychain: true });
+    expect(deps.runCalls.find((call) => call.file === SECURITY)?.args).toEqual([
+      "find-generic-password",
+      "-s",
+      claudeKeychainService("/work/env-claude"),
+    ]);
   });
 
   it("says Raycast needs permission to control Terminal when macOS refuses it", async () => {
@@ -617,6 +654,27 @@ describe("connectLocal for Codex", () => {
     expect(terminalScript(deps)).toContain(
       `do script "'/usr/bin/env' 'CODEX_HOME=/work/shell-codex' '${CODEX_BIN}' 'login'"`,
     );
+  });
+
+  it("keeps the CODEX_HOME saved before when the login shell can't be asked, and reads that folder", async () => {
+    const deps = fakeDeps({ files: { "/work/saved-codex/auth.json": "{}" } });
+    deps.programs.push({ file: SHELL, respond: { exitCode: 1, stdout: "", stderr: "boom" } });
+    deps.env.CODEX_HOME = "/work/env-codex";
+    const { ui, saved, connections } = testUi({}, { codexHome: "/work/saved-codex" });
+
+    expect(await connectLocal(deps, CODEX, ui)).toEqual({ kind: "connected" });
+    expect(saved).toEqual([{ codexHome: undefined }]);
+    expect(connections()).toEqual({ codexHome: "/work/saved-codex" });
+  });
+
+  it("clears the CODEX_HOME saved before when the login shell answers that it isn't set, and reads the extension's folder", async () => {
+    const deps = withTools(fakeDeps({ files: { "/work/env-codex/auth.json": "{}" } }), [CODEX_BIN]);
+    deps.env.CODEX_HOME = "/work/env-codex";
+    const { ui, saved, connections } = testUi({}, { codexHome: "/work/saved-codex" });
+
+    expect(await connectLocal(deps, CODEX, ui)).toEqual({ kind: "connected" });
+    expect(saved).toEqual([{ codexHome: "" }]);
+    expect(connections()).toEqual({});
   });
 
   it("runs codex login in Terminal and connects once auth.json appears", async () => {
@@ -986,7 +1044,14 @@ describe("connectLocal when the Connect is already stopped", () => {
     keychainAttributes(deps, ITEM);
     const controller = new AbortController();
     const verify = vi.fn(async () => "ok" as const);
-    const { ui } = testUi({ signal: controller.signal, verify, save: async () => controller.abort() });
+    const { ui } = testUi({
+      signal: controller.signal,
+      verify,
+      save: async () => {
+        controller.abort();
+        return {};
+      },
+    });
 
     expect(await connectLocal(deps, CLAUDE, ui)).toEqual(STOPPED_OUTCOME);
     expect(verify).not.toHaveBeenCalled();
