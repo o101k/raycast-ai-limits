@@ -363,12 +363,13 @@ function errorMessage(error: unknown): string {
 }
 
 // The settings a Connect verifies with. Only the login it signs in to counts. For Claude that is Claude Code's login, so a
-// working claude.ai session key can't make a broken one look fine. For Cursor it is the app's login, so a saved cookie
-// can't make a missing one look fine.
+// working claude.ai session key can't make a broken one look fine. Connect is the consent to read that login, so the
+// Keychain is read even when a refresh has turned the setting off during the Connect. For Cursor it is the app's login,
+// so a saved cookie can't make a missing one look fine.
 function verifySettings(method: LocalConnectMethod, settings: Settings): Settings {
   switch (method.kind) {
     case "claude":
-      return { ...settings, claudeSessionKey: undefined };
+      return { ...settings, claudeSessionKey: undefined, claudeKeychain: true };
     case "cursor":
       return { ...settings, cursorCookie: undefined };
     default:
@@ -457,13 +458,10 @@ export default function Command() {
   }
 
   // macOS refused the Keychain read during a refresh. The setting is turned off so later refreshes don't ask again, and
-  // choosing Connect turns it on again. A Claude Connect that is running is left alone, since its own verify turns the
-  // setting off when macOS refuses, and this would only save over that.
+  // choosing Connect turns it on again. This holds while a Claude Connect runs too, since the refresh right after a
+  // Connect can be the first read and the one macOS refuses. Connect's own verify reads the Keychain either way (see
+  // verifySettings), and Connect saves the setting on again when it connects.
   const onKeychainDenied = useCallback(() => {
-    const running = connectAbortsRef.current.get("claude");
-    if (running && !running.signal.aborted) {
-      return;
-    }
     void saveConnections({ claudeKeychain: false }).then(updateConnections, () => undefined);
   }, [updateConnections]);
   const { states, refresh } = useUsage(onKeychainDenied);

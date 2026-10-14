@@ -149,8 +149,18 @@ export async function connectLocal(deps: Deps, method: LocalConnectMethod, ui: C
   }
 }
 
-// Clicking Connect is the consent to read Claude Code's login, so the setting is saved before anything is read.
+// A refresh that runs during Connect can turn the Keychain setting off when macOS refuses it. Once the login works, the
+// setting is saved on again, so the refresh after Connect reads the Keychain. A Connect stopped by then saves nothing.
 async function connectClaude(deps: Deps, ui: ConnectUi): Promise<ConnectOutcome> {
+  const outcome = await connectClaudeLogin(deps, ui);
+  if (outcome.kind === "connected" && !ui.signal?.aborted) {
+    await ui.save({ claudeKeychain: true });
+  }
+  return outcome;
+}
+
+// Clicking Connect is the consent to read Claude Code's login, so the setting is saved before anything is read.
+async function connectClaudeLogin(deps: Deps, ui: ConnectUi): Promise<ConnectOutcome> {
   // A Connect stopped before this saves nothing and reads nothing.
   if (ui.signal?.aborted) {
     return STOPPED;

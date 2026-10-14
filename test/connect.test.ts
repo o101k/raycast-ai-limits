@@ -222,7 +222,7 @@ describe("connectLocal for Claude Code on macOS", () => {
     await connectLocal(deps, CLAUDE, ui);
 
     expect(consentAtRead).toBe(1);
-    expect(saved).toEqual([{ claudeKeychain: true, claudeConfigDir: "" }]);
+    expect(saved).toEqual([{ claudeKeychain: true, claudeConfigDir: "" }, { claudeKeychain: true }]);
   });
 
   it("connects without signing in when the Keychain login works, and reads no password itself", async () => {
@@ -330,6 +330,42 @@ describe("connectLocal for Claude Code on macOS", () => {
 
     expect(await connectLocal(deps, CLAUDE, ui)).toEqual({ kind: "connected" });
     expect(passwordReads(deps)).toBe(1);
+  });
+
+  it("saves the Keychain setting on again when it connects, after a refresh turned it off during the sign-in", async () => {
+    const deps = withTools(fakeDeps(), [CLAUDE_BIN]);
+    keychainAttributes(deps, MISSING, MISSING, ITEM);
+    deps.programs.push({ file: OSASCRIPT, respond: OK });
+    const harness = testUi({
+      // A refresh that macOS refuses turns the setting off while Connect waits, and the login appears after that.
+      sleep: async () => {
+        await harness.ui.save({ claudeKeychain: false });
+      },
+    });
+
+    expect(await connectLocal(deps, CLAUDE, harness.ui)).toEqual({ kind: "connected" });
+    expect(harness.saved).toEqual([
+      { claudeKeychain: true, claudeConfigDir: "" },
+      { claudeKeychain: false },
+      { claudeKeychain: true },
+    ]);
+    expect(harness.connections()).toEqual({ claudeKeychain: true });
+  });
+
+  it("does not save the Keychain setting again when Connect is stopped while it verifies the login", async () => {
+    const deps = withTools(fakeDeps(), [CLAUDE_BIN]);
+    keychainAttributes(deps, ITEM);
+    const controller = new AbortController();
+    const { ui, saved } = testUi({
+      signal: controller.signal,
+      verify: async () => {
+        controller.abort();
+        return "ok";
+      },
+    });
+
+    expect(await connectLocal(deps, CLAUDE, ui)).toEqual({ kind: "connected" });
+    expect(saved).toEqual([{ claudeKeychain: true, claudeConfigDir: "" }]);
   });
 
   it("signs in in Terminal when the Keychain has no login, then connects once one appears", async () => {
@@ -454,7 +490,7 @@ describe("connectLocal for Claude Code on macOS", () => {
     const { ui, saved } = testUi();
 
     expect(await connectLocal(deps, CLAUDE, ui)).toEqual({ kind: "connected" });
-    expect(saved).toEqual([{ claudeKeychain: true, claudeConfigDir: "/work/shell-claude" }]);
+    expect(saved).toEqual([{ claudeKeychain: true, claudeConfigDir: "/work/shell-claude" }, { claudeKeychain: true }]);
     expect(deps.runCalls.find((call) => call.file === SECURITY)?.args).toEqual([
       "find-generic-password",
       "-s",
@@ -473,7 +509,7 @@ describe("connectLocal for Claude Code on macOS", () => {
     const { ui, saved, connections } = testUi({}, { claudeConfigDir: "/work/saved-claude" });
 
     expect(await connectLocal(deps, CLAUDE, ui)).toEqual({ kind: "connected" });
-    expect(saved).toEqual([{ claudeKeychain: true, claudeConfigDir: undefined }]);
+    expect(saved).toEqual([{ claudeKeychain: true, claudeConfigDir: undefined }, { claudeKeychain: true }]);
     expect(connections()).toEqual({ claudeKeychain: true, claudeConfigDir: "/work/saved-claude" });
     expect(deps.runCalls.find((call) => call.file === SECURITY)?.args).toEqual([
       "find-generic-password",
@@ -489,7 +525,7 @@ describe("connectLocal for Claude Code on macOS", () => {
     const { ui, saved, connections } = testUi({}, { claudeConfigDir: "/work/saved-claude" });
 
     expect(await connectLocal(deps, CLAUDE, ui)).toEqual({ kind: "connected" });
-    expect(saved).toEqual([{ claudeKeychain: true, claudeConfigDir: "" }]);
+    expect(saved).toEqual([{ claudeKeychain: true, claudeConfigDir: "" }, { claudeKeychain: true }]);
     expect(connections()).toEqual({ claudeKeychain: true });
     expect(deps.runCalls.find((call) => call.file === SECURITY)?.args).toEqual([
       "find-generic-password",
@@ -519,7 +555,7 @@ describe("connectLocal for Claude Code on other platforms", () => {
 
     expect(await connectLocal(deps, CLAUDE, ui)).toEqual({ kind: "connected" });
     expect(deps.runCalls.map((call) => call.file)).toEqual([SHELL]);
-    expect(saved).toEqual([{ claudeKeychain: true, claudeConfigDir: "" }]);
+    expect(saved).toEqual([{ claudeKeychain: true, claudeConfigDir: "" }, { claudeKeychain: true }]);
   });
 
   it("reads the credentials file from CLAUDE_CONFIG_DIR when it is set", async () => {
