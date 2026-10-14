@@ -227,7 +227,7 @@ export default function Command() {
     };
   }, []);
 
-  const settings = toSettings(preferences, gitHubToken);
+  const settings = toSettings(preferences, {}, gitHubToken);
   const { states, refresh } = useUsage();
 
   // The first refresh waits for the GitHub token check, and then runs once.
@@ -243,7 +243,7 @@ export default function Command() {
     try {
       const token = await signInWithGitHub();
       setGitHubToken(token);
-      await refresh(toSettings(preferences, token), { force: true });
+      await refresh(toSettings(preferences, {}, token), { force: true });
     } catch (error) {
       await showToast({
         style: Toast.Style.Failure,
@@ -257,7 +257,7 @@ export default function Command() {
     try {
       await signOutOfGitHub();
       setGitHubToken(undefined);
-      await refresh(toSettings(preferences, undefined), { force: true });
+      await refresh(toSettings(preferences, {}, undefined), { force: true });
     } catch (error) {
       await showToast({
         style: Toast.Style.Failure,
