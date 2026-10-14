@@ -17,31 +17,95 @@ export interface Transition {
 // every open. A result exactly this old counts as stale and is fetched again.
 export const FRESH_MS = 2 * 60_000;
 
+// A forced refresh of every provider (Refresh) skips results younger than this, so pressing Refresh repeatedly
+// doesn't hit rate-limited endpoints.
+export const MIN_FORCED_MS = 30_000;
+
+// True while a provider has asked to be left alone after a 429, until its `retryAt` passes.
+function isCoolingFailure(failure: Failure | undefined, now: number): failure is Failure {
+  return failure?.retryAt !== undefined && failure.retryAt > now;
+}
+
+export function isCoolingDown(state: ProviderState, now: number): boolean {
+  return isCoolingFailure(state.cooldown, now);
+}
+
 // A provider with no saved result is still loading, so the spinner shows while it is fetched. Providers with a saved
-// result show it at once, and become loading only when they are refreshed.
-export function initialStates(ids: readonly ProviderId[], cached: Cached): States {
+// result show it at once, and become loading only when they are refreshed. A provider still cooling down from an
+// earlier session is not loading, since it won't be fetched until the cooldown ends. It shows its saved result, or its
+// failure when there is none.
+export function initialStates(
+  ids: readonly ProviderId[],
+  cached: Cached,
+  cooldowns: Partial<Record<ProviderId, Failure>> = {},
+  now: number = Date.now(),
+): States {
   const states = {} as States;
   for (const id of ids) {
-    states[id] = { loading: cached[id] === undefined, usage: cached[id] };
+    const cooldown = cooldowns[id];
+    if (isCoolingFailure(cooldown, now)) {
+      states[id] = {
+        loading: false,
+        usage: cached[id],
+        cooldown,
+        failure: cached[id] === undefined ? cooldown : undefined,
+      };
+    } else {
+      states[id] = { loading: cached[id] === undefined, usage: cached[id] };
+    }
   }
   return states;
 }
 
-// Which providers to fetch. A forced refresh (Refresh, sign in or out) fetches all of them. Otherwise a provider is
-// fetched when it has no saved result, or when its result is FRESH_MS old or older. Providers with no saved result are
-// always fetched, since that is how "not connected" is found, and that costs no network.
+// The failures that are still cooling down, so the view can save them and the next open waits too.
+export function cooldownsOf(states: States, now: number): Partial<Record<ProviderId, Failure>> {
+  const cooldowns: Partial<Record<ProviderId, Failure>> = {};
+  for (const [id, state] of Object.entries(states) as [ProviderId, ProviderState][]) {
+    if (isCoolingFailure(state.cooldown, now)) {
+      cooldowns[id] = state.cooldown;
+    }
+  }
+  return cooldowns;
+}
+
+// When each cooling provider's cooldown ends, in epoch milliseconds. The view schedules its deferred fetch for these.
+export function cooldownEnds(states: States, now: number): Partial<Record<ProviderId, number>> {
+  const ends: Partial<Record<ProviderId, number>> = {};
+  for (const [id, state] of Object.entries(states) as [ProviderId, ProviderState][]) {
+    if (isCoolingDown(state, now) && state.cooldown?.retryAt !== undefined) {
+      ends[id] = state.cooldown.retryAt;
+    }
+  }
+  return ends;
+}
+
+// Which providers to fetch.
+// - `only` (Connect, Disconnect, sign in or out) fetches exactly those providers, ignoring freshness and cooldowns.
+//   Their credentials just changed, so the result must show at once.
+// - A provider in cooldown after a 429 is never fetched, forced or not, until its retryAt passes.
+// - A forced refresh (Refresh) fetches providers with no saved result, or whose result is MIN_FORCED_MS old or older.
+// - Otherwise a provider is fetched when it has no saved result, or when its result is FRESH_MS old or older. Providers
+//   with no saved result are always fetched, since that is how "not connected" is found, and that costs no network.
 export function providersToRefresh(
   states: States,
   ids: readonly ProviderId[],
   now: number,
-  options: { force: boolean },
+  options: { force: boolean; only?: readonly ProviderId[] },
 ): ProviderId[] {
-  if (options.force) {
-    return [...ids];
+  if (options.only) {
+    const only = options.only;
+    return ids.filter((id) => only.includes(id));
   }
   return ids.filter((id) => {
-    const usage = states[id].usage;
-    return usage === undefined || now - usage.fetchedAt >= FRESH_MS;
+    const state = states[id];
+    if (isCoolingDown(state, now)) {
+      return false;
+    }
+    const usage = state.usage;
+    if (usage === undefined) {
+      return true;
+    }
+    return now - usage.fetchedAt >= (options.force ? MIN_FORCED_MS : FRESH_MS);
   });
 }
 
@@ -62,7 +126,9 @@ export function applySuccess(states: States, cached: Cached, id: ProviderId, usa
 }
 
 // A "not-connected" failure means the credentials were removed, so the saved numbers are dropped from the state and the
-// cache. Other failures keep the saved numbers and show the failure next to them.
+// cache. A 429 keeps the saved numbers on screen with no failure shown, and only records the cooldown, so the user
+// never sees a rate-limit error while older results exist. With no saved numbers the 429 is shown as the failure. Other
+// failures keep the saved numbers and show the failure next to them.
 export function applyFailure(states: States, cached: Cached, id: ProviderId, failure: Failure): Transition {
   if (failure.kind === "not-connected") {
     const remaining = { ...cached };
@@ -70,6 +136,16 @@ export function applyFailure(states: States, cached: Cached, id: ProviderId, fai
     return {
       states: { ...states, [id]: { loading: false, failure } },
       cached: remaining,
+    };
+  }
+  if (failure.retryAt !== undefined) {
+    const usage = states[id].usage;
+    return {
+      states: {
+        ...states,
+        [id]: { loading: false, usage, cooldown: failure, failure: usage === undefined ? failure : undefined },
+      },
+      cached,
     };
   }
   return {
@@ -96,7 +172,7 @@ export function sections(
 
 export function toFailure(error: unknown): Failure {
   if (error instanceof ProviderError) {
-    return { kind: error.kind, message: error.message, hint: error.hint, code: error.code };
+    return { kind: error.kind, message: error.message, hint: error.hint, code: error.code, retryAt: error.retryAt };
   }
   return { kind: "http", message: error instanceof Error ? error.message : String(error) };
 }

@@ -106,6 +106,9 @@ export class ProviderError extends Error {
     // The HTTP status, when the error came from a provider's answer.
     readonly status?: number,
     readonly code?: ProviderErrorCode,
+    // When the provider allows the next request, in epoch milliseconds. Set on a 429, so the extension waits instead of
+    // asking again on every open and refresh.
+    readonly retryAt?: number,
   ) {
     super(message);
     this.name = "ProviderError";

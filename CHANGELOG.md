@@ -15,3 +15,4 @@
 - Fallback actions for a claude.ai session key, a Cursor session cookie and an OpenRouter API key
 - The last result of each provider is kept, so the list opens with numbers while it refreshes
 - Copy Usage, Open Usage Dashboard and Refresh actions
+- Waits as long as a provider asks after HTTP 429, and Refresh skips results under 30 seconds old, so rate-limited endpoints such as Claude's aren't hit again too soon

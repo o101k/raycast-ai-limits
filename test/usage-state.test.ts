@@ -4,9 +4,13 @@ import {
   applyFailure,
   applySuccess,
   Cached,
+  cooldownEnds,
+  cooldownsOf,
   FRESH_MS,
+  isCoolingDown,
   initialStates,
   isNotConnected,
+  MIN_FORCED_MS,
   providersToRefresh,
   sections,
   startRefresh,
@@ -31,6 +35,13 @@ function usage(id: "claude" | "codex" | "copilot", fetchedAt = NOW): ProviderUsa
 
 const notConnected = { kind: "not-connected" as const, message: "No credentials", hint: "Sign in" };
 
+// A provider that answered 429 and asked to wait until `retryAt`, as applyFailure leaves it. The cooldown is kept
+// apart, and the failure is shown only when there is no saved result.
+function rateLimited(retryAt: number, saved?: ProviderUsage): ProviderState {
+  const cooldown = { kind: "http" as const, message: "rate limited", retryAt };
+  return { loading: false, usage: saved, cooldown, failure: saved === undefined ? cooldown : undefined };
+}
+
 describe("initialStates", () => {
   it("starts providers with no saved result loading", () => {
     const states = initialStates(IDS, {});
@@ -42,6 +53,32 @@ describe("initialStates", () => {
     const states = initialStates(IDS, cached);
     expect(states.claude).toEqual({ loading: false, usage: cached.claude });
     expect(states.codex).toEqual({ loading: true, usage: undefined });
+  });
+
+  it("restores a cooldown that is still active, with its saved data, and does not load the provider", () => {
+    const cached: Cached = { claude: usage("claude", NOW - 10 * 60_000) };
+    const cooldown = { kind: "http" as const, message: "rate limited", retryAt: NOW + 60_000 };
+    const states = initialStates(IDS, cached, { claude: cooldown }, NOW);
+    expect(states.claude).toEqual({ loading: false, usage: cached.claude, cooldown });
+    expect(states.codex.loading).toBe(true);
+  });
+
+  it("shows no failure for an active cooldown when there is saved usage", () => {
+    const cooldown = { kind: "http" as const, message: "rate limited", retryAt: NOW + 60_000 };
+    const states = initialStates(IDS, { claude: usage("claude") }, { claude: cooldown }, NOW);
+    expect(states.claude.failure).toBeUndefined();
+  });
+
+  it("shows the failure for an active cooldown when there is no saved usage", () => {
+    const cooldown = { kind: "http" as const, message: "rate limited", retryAt: NOW + 60_000 };
+    const states = initialStates(IDS, {}, { claude: cooldown }, NOW);
+    expect(states.claude).toEqual({ loading: false, usage: undefined, cooldown, failure: cooldown });
+  });
+
+  it("ignores a cooldown that has ended", () => {
+    const cooldown = { kind: "http" as const, message: "rate limited", retryAt: NOW - 1 };
+    const states = initialStates(IDS, {}, { claude: cooldown }, NOW);
+    expect(states.claude).toEqual({ loading: true, usage: undefined });
   });
 });
 
@@ -77,9 +114,67 @@ describe("providersToRefresh", () => {
     expect(providersToRefresh(states, ALL, NOW, { force: false })).not.toContain("claude");
   });
 
-  it("fetches every provider when forced, even fresh ones", () => {
-    const states = statesWith({ claude: usage("claude", NOW), codex: usage("codex", NOW) });
+  it("fetches every provider when forced, if their saved results are at least MIN_FORCED_MS old", () => {
+    // Older than MIN_FORCED_MS but still fresh for an unforced refresh.
+    const older = NOW - 60_000;
+    const states = statesWith({ claude: usage("claude", older), codex: usage("codex", older) });
     expect(providersToRefresh(states, ALL, NOW, { force: true })).toEqual(ALL);
+  });
+
+  it("skips a forced refresh of a result younger than MIN_FORCED_MS", () => {
+    const states = statesWith({ claude: usage("claude", NOW - MIN_FORCED_MS + 1), codex: usage("codex", NOW) });
+    expect(providersToRefresh(states, ALL, NOW, { force: true })).toEqual(["copilot"]);
+  });
+
+  it("treats a forced result exactly MIN_FORCED_MS old as stale", () => {
+    const states = statesWith({ claude: usage("claude", NOW - MIN_FORCED_MS) });
+    expect(providersToRefresh(states, ALL, NOW, { force: true })).toContain("claude");
+  });
+
+  it("skips a provider in cooldown, forced or not, even with saved data that is stale", () => {
+    const states: States = {
+      ...statesWith({}),
+      claude: rateLimited(NOW + 60_000, usage("claude", NOW - 10 * 60_000)),
+    };
+    expect(providersToRefresh(states, ALL, NOW, { force: false })).toEqual(["codex", "copilot"]);
+    expect(providersToRefresh(states, ALL, NOW, { force: true })).toEqual(["codex", "copilot"]);
+  });
+
+  it("skips a provider whose cooldown is hidden behind its saved usage", () => {
+    const states: States = { ...statesWith({}), claude: rateLimited(NOW + 60_000, usage("claude", NOW - 10 * 60_000)) };
+    expect(states.claude.failure).toBeUndefined();
+    expect(providersToRefresh(states, ALL, NOW, { force: true })).toEqual(["codex", "copilot"]);
+  });
+
+  it("skips a provider in cooldown that has no saved data", () => {
+    const states: States = { ...statesWith({}), claude: rateLimited(NOW + 60_000) };
+    expect(providersToRefresh(states, ALL, NOW, { force: true })).toEqual(["codex", "copilot"]);
+  });
+
+  it("fetches a provider whose cooldown has ended", () => {
+    const states: States = {
+      ...statesWith({}),
+      claude: rateLimited(NOW - 1, usage("claude", NOW - 10 * 60_000)),
+    };
+    expect(providersToRefresh(states, ALL, NOW, { force: false })).toEqual(ALL);
+    expect(providersToRefresh(states, ALL, NOW, { force: true })).toEqual(ALL);
+  });
+
+  it("fetches exactly the providers given in only, ignoring freshness and cooldowns", () => {
+    const states: States = {
+      ...statesWith({ codex: usage("codex", NOW), copilot: usage("copilot", NOW) }),
+      claude: rateLimited(NOW + 60_000, usage("claude", NOW)),
+    };
+    expect(providersToRefresh(states, ALL, NOW, { force: true, only: ["claude", "codex"] })).toEqual([
+      "claude",
+      "codex",
+    ]);
+    expect(providersToRefresh(states, ALL, NOW, { force: false, only: ["copilot"] })).toEqual(["copilot"]);
+  });
+
+  it("fetches nothing for an empty only list", () => {
+    const states = statesWith({});
+    expect(providersToRefresh(states, ALL, NOW, { force: true, only: [] })).toEqual([]);
   });
 
   it("keeps the order of the ids it is given", () => {
@@ -101,6 +196,74 @@ describe("startRefresh", () => {
   it("marks nothing loading for an empty list", () => {
     const states = initialStates(IDS, { claude: usage("claude"), codex: usage("codex"), copilot: usage("copilot") });
     expect(Object.values(startRefresh(states, [])).some((state) => state.loading)).toBe(false);
+  });
+});
+
+describe("applyFailure with a 429", () => {
+  const cooling = { kind: "http" as const, message: "rate limited", retryAt: NOW + 60_000 };
+
+  it("keeps the saved usage on screen with no failure, records the cooldown, and leaves the cache unchanged", () => {
+    const saved = usage("claude", NOW - 10 * 60_000);
+    const cached: Cached = { claude: saved };
+    const result = applyFailure(initialStates(IDS, cached), cached, "claude", cooling);
+    expect(result.states.claude).toEqual({ loading: false, usage: saved, cooldown: cooling });
+    expect(result.states.claude.failure).toBeUndefined();
+    expect(result.cached).toBe(cached);
+  });
+
+  it("shows the failure and records the cooldown when there is no saved usage", () => {
+    const result = applyFailure(initialStates(IDS, {}), {}, "claude", cooling);
+    expect(result.states.claude).toEqual({ loading: false, usage: undefined, cooldown: cooling, failure: cooling });
+  });
+
+  it("clears the cooldown when a later refresh succeeds", () => {
+    const saved = usage("claude", NOW - 10 * 60_000);
+    const limited = applyFailure(initialStates(IDS, { claude: saved }), { claude: saved }, "claude", cooling);
+    const result = applySuccess(limited.states, limited.cached, "claude", usage("claude", NOW));
+    expect(result.states.claude.cooldown).toBeUndefined();
+    expect(result.states.claude.failure).toBeUndefined();
+  });
+
+  it("keeps the cooldown through startRefresh", () => {
+    const saved = usage("claude", NOW - 10 * 60_000);
+    const limited = applyFailure(initialStates(IDS, { claude: saved }), { claude: saved }, "claude", cooling);
+    expect(startRefresh(limited.states, ["claude"]).claude.cooldown).toEqual(cooling);
+  });
+});
+
+describe("isCoolingDown", () => {
+  it("reads the cooldown, not the failure", () => {
+    const retry = { kind: "http" as const, message: "rate limited", retryAt: NOW + 60_000 };
+    expect(isCoolingDown({ loading: false, cooldown: retry }, NOW)).toBe(true);
+    expect(isCoolingDown({ loading: false, failure: retry }, NOW)).toBe(false);
+  });
+});
+
+describe("cooldownEnds", () => {
+  it("maps each provider still cooling down to the time its cooldown ends", () => {
+    const states: States = {
+      ...initialStates(IDS, {}),
+      claude: rateLimited(NOW + 60_000),
+      codex: rateLimited(NOW - 1),
+    };
+    expect(cooldownEnds(states, NOW)).toEqual({ claude: NOW + 60_000 });
+  });
+});
+
+describe("cooldownsOf", () => {
+  it("returns the failures still cooling down, and leaves out expired ones and other failures", () => {
+    const cooling = { kind: "http" as const, message: "rate limited", retryAt: NOW + 60_000 };
+    const states: States = {
+      ...initialStates(IDS, {}),
+      claude: { loading: false, cooldown: cooling },
+      codex: rateLimited(NOW - 1),
+      copilot: { loading: false, failure: notConnected },
+    };
+    expect(cooldownsOf(states, NOW)).toEqual({ claude: cooling });
+  });
+
+  it("returns nothing when no provider is cooling down", () => {
+    expect(cooldownsOf(initialStates(IDS, {}), NOW)).toEqual({});
   });
 });
 
@@ -224,6 +387,12 @@ describe("toFailure", () => {
       hint: "Choose Connect again",
       code: "keychain-denied",
     });
+  });
+
+  it("carries the retry time of a rate-limited ProviderError", () => {
+    const error = new ProviderError("http", "Claude is rate limiting requests (HTTP 429)", "Wait", 429, undefined, NOW);
+
+    expect(toFailure(error)).toMatchObject({ kind: "http", retryAt: NOW });
   });
 
   it("turns other errors into an http failure", () => {

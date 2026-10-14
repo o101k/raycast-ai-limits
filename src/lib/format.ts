@@ -17,6 +17,8 @@ export interface Failure {
   hint?: string;
   // Carried from the ProviderError, so the view can act on it (see ProviderErrorCode).
   code?: ProviderErrorCode;
+  // When the provider allows the next request, in epoch milliseconds. Set after a 429 (see ProviderError.retryAt).
+  retryAt?: number;
 }
 
 // What the view knows about one provider. `usage` is the last successful result. It can come from the cache, while a
@@ -24,7 +26,10 @@ export interface Failure {
 export interface ProviderState {
   loading: boolean;
   usage?: ProviderUsage;
+  // Shown to the user. After a 429 it is set only when there is no saved usage, since saved numbers show as they are.
   failure?: Failure;
+  // The 429 still cooling down, kept so refreshes wait until its retryAt. Not shown on its own, see `failure`.
+  cooldown?: Failure;
 }
 
 const MINUTE_MS = 60_000;

@@ -348,6 +348,23 @@ describe("fetchClaudeUsage with the Claude Code credentials file", () => {
     expect(error).toMatchObject({ kind: "auth", hint: expect.stringContaining("Open Claude Code") });
   });
 
+  it("reports when Claude allows the next request after a 429 when there is no session key", async () => {
+    const deps = fakeDeps({
+      files: { [CREDENTIALS]: oauthCredentials({}) },
+      routes: [
+        {
+          prefix: "https://api.anthropic.com/api/oauth/usage",
+          respond: { status: 429, headers: { "Retry-After": "60" }, body: {} },
+        },
+      ],
+    });
+
+    const error = await fetchClaudeUsage(deps, NO_SETTINGS).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(ProviderError);
+    expect(error).toMatchObject({ kind: "http", status: 429, retryAt: NOW + 60_000 });
+  });
+
   it("does not use the session key when the credentials file has no user:profile scope", async () => {
     const deps = fakeDeps({
       files: { [CREDENTIALS]: oauthCredentials({ scopes: ["user:inference"] }) },
