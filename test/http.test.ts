@@ -9,6 +9,7 @@ import {
   clampPercent,
   decodeJwtPayload,
   requestJson,
+  retryDelayMs,
   titleCase,
 } from "../src/lib/http";
 import { ProviderError } from "../src/lib/types";
@@ -199,6 +200,57 @@ describe("requestJson", () => {
     expect(error.status).toBeUndefined();
   });
 
+  it("throws an http error with the status and when the provider allows the next request on a 429", async () => {
+    const deps = fakeDeps({
+      routes: [{ prefix: URL, respond: { status: 429, headers: { "Retry-After": "120" }, body: {} } }],
+    });
+
+    const error = await failureOf(requestJson(deps, URL, { provider: "Claude", authHint: "Sign in again" }));
+
+    expect(error).toMatchObject({
+      kind: "http",
+      message: "Claude is rate limiting requests (HTTP 429)",
+      hint: "The extension waits 2 min before asking Claude again",
+      status: 429,
+      retryAt: NOW + 120_000,
+    });
+  });
+
+  it("reads an HTTP-date Retry-After on a 429 as the time to wait until", async () => {
+    const deps = fakeDeps({
+      routes: [
+        {
+          prefix: URL,
+          respond: { status: 429, headers: { "Retry-After": new Date(NOW + 90_000).toUTCString() }, body: {} },
+        },
+      ],
+    });
+
+    const error = await failureOf(requestJson(deps, URL, { provider: "Claude" }));
+
+    expect(error).toMatchObject({ kind: "http", status: 429, retryAt: NOW + 90_000 });
+  });
+
+  it("waits five minutes on a 429 that has no Retry-After", async () => {
+    const deps = fakeDeps({ routes: [{ prefix: URL, respond: { status: 429, body: {} } }] });
+
+    const error = await failureOf(requestJson(deps, URL, { provider: "Claude" }));
+
+    expect(error.retryAt).toBe(NOW + 5 * 60_000);
+    expect(error.hint).toBe("The extension waits 5 min before asking Claude again");
+  });
+
+  it("caps a 429 Retry-After at one hour", async () => {
+    const deps = fakeDeps({
+      routes: [{ prefix: URL, respond: { status: 429, headers: { "Retry-After": "86400" }, body: {} } }],
+    });
+
+    const error = await failureOf(requestJson(deps, URL, { provider: "Claude" }));
+
+    expect(error.retryAt).toBe(NOW + 60 * 60_000);
+    expect(error.hint).toBe("The extension waits 60 min before asking Claude again");
+  });
+
   it("throws a parse error when a 200 answer is not JSON", async () => {
     const deps = fakeDeps({ routes: [{ prefix: URL, respond: { body: "<html>maintenance</html>" } }] });
 
@@ -206,6 +258,31 @@ describe("requestJson", () => {
 
     expect(error).toMatchObject({ kind: "parse", message: "Gemini returned a response that isn't JSON" });
     expect(error.status).toBeUndefined();
+  });
+});
+
+describe("retryDelayMs", () => {
+  it("reads a number of seconds", () => {
+    expect(retryDelayMs("60", NOW)).toBe(60_000);
+    expect(retryDelayMs(" 30 ", NOW)).toBe(30_000);
+  });
+
+  it("reads an HTTP date as the time from now until that date", () => {
+    expect(retryDelayMs(new Date(NOW + 10 * 60_000).toUTCString(), NOW)).toBe(10 * 60_000);
+  });
+
+  it.each<[string | null, string]>([
+    [null, "no header"],
+    ["", "an empty header"],
+    ["0", "zero seconds"],
+    ["soon", "text that is not a date"],
+    [new Date(NOW - 60_000).toUTCString(), "a date already past"],
+  ])("gives the five minute default for %s (%s)", (header) => {
+    expect(retryDelayMs(header, NOW)).toBe(5 * 60_000);
+  });
+
+  it("caps a date more than an hour away", () => {
+    expect(retryDelayMs(new Date(NOW + 3 * 60 * 60_000).toUTCString(), NOW)).toBe(60 * 60_000);
   });
 });
 

@@ -18,6 +18,7 @@ import { ApiKeyForm, ApiKeyMethod, SecretForm } from "./components/connect-forms
 import {
   DisplayMode,
   detailMarkdown,
+  Failure,
   failureTitle,
   formatUpdated,
   listSummary,
@@ -47,6 +48,7 @@ import {
   applyFailure,
   applySuccess,
   Cached,
+  cooldownsOf,
   initialStates,
   isNotConnected,
   providersToRefresh,
@@ -61,6 +63,8 @@ import { ProviderId, Settings } from "./lib/types";
 // refresh runs. The transitions in usage-state.ts decide what is kept.
 const cache = new Cache();
 const CACHE_KEY = "usage-v1";
+// Providers that answered 429 and asked to wait. Kept apart from the results, and an expired one is simply dropped.
+const COOLDOWN_KEY = "cooldowns-v1";
 
 const PROVIDER_IDS: ProviderId[] = PROVIDERS.map((provider) => provider.id);
 
@@ -81,11 +85,32 @@ function writeCache(usage: Cached) {
   }
 }
 
+function readCooldowns(): Partial<Record<ProviderId, Failure>> {
+  try {
+    const raw = cache.get(COOLDOWN_KEY);
+    return raw ? (JSON.parse(raw) as Partial<Record<ProviderId, Failure>>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeCooldowns(cooldowns: Partial<Record<ProviderId, Failure>>) {
+  try {
+    cache.set(COOLDOWN_KEY, JSON.stringify(cooldowns));
+  } catch {
+    // Without it a reopen can ask a rate-limited provider again, which the cooldown avoids. The list still works.
+  }
+}
+
 // The hook only holds the latest transition and renders it. Every change goes through the pure functions in
 // usage-state.ts, which are tested.
 function useUsage(onKeychainDenied: () => void) {
   const [initialCache] = useState(readCache);
-  const storeRef = useRef<Transition>({ states: initialStates(PROVIDER_IDS, initialCache), cached: initialCache });
+  const [initialCooldowns] = useState(readCooldowns);
+  const storeRef = useRef<Transition>({
+    states: initialStates(PROVIDER_IDS, initialCache, initialCooldowns, Date.now()),
+    cached: initialCache,
+  });
   const [states, setStates] = useState(storeRef.current.states);
   // The refresh that asked for each provider last. A result counts only when it comes from that refresh, so a forced
   // refresh that starts while a partial one is running wins, and a partial refresh never drops another one's results.
@@ -95,11 +120,12 @@ function useUsage(onKeychainDenied: () => void) {
   const commit = useCallback((next: Transition) => {
     storeRef.current = next;
     writeCache(next.cached);
+    writeCooldowns(cooldownsOf(next.states, Date.now()));
     setStates(next.states);
   }, []);
 
   const refresh = useCallback(
-    async (settings: Settings, options: { force: boolean }) => {
+    async (settings: Settings, options: { force: boolean; only?: ProviderId[] }) => {
       const ids = providersToRefresh(storeRef.current.states, PROVIDER_IDS, Date.now(), options);
       if (ids.length === 0) {
         return;
@@ -476,10 +502,11 @@ export default function Command() {
     }
   }, [ready, refresh, settings]);
 
-  // Refreshes every provider with the latest token and connections. A forced refresh, so a new or removed login shows
-  // at once.
-  function refreshWith() {
-    return refresh(currentSettings(), { force: true });
+  // Refreshes providers with the latest token and connections. Without `only`, that is every provider, subject to the
+  // 30-second floor and cooldowns in providersToRefresh. `only` names the providers whose login just changed, which are
+  // fetched at once.
+  function refreshWith(only?: ProviderId[]) {
+    return refresh(currentSettings(), { force: true, only });
   }
 
   // Signs in with GitHub. `signOutFirst` removes the stored token before the sign-in, because the sign-in hands back
@@ -491,7 +518,7 @@ export default function Command() {
         updateGitHubToken(undefined);
       }
       updateGitHubToken(await signInWithGitHub());
-      await refreshWith();
+      await refreshWith(["copilot"]);
     } catch (error) {
       await showToast({
         style: Toast.Style.Failure,
@@ -505,7 +532,7 @@ export default function Command() {
     try {
       await signOutOfGitHub();
       updateGitHubToken(undefined);
-      await refreshWith();
+      await refreshWith(["copilot"]);
     } catch (error) {
       await showToast({
         style: Toast.Style.Failure,
@@ -557,7 +584,7 @@ export default function Command() {
           message: errorMessage(error),
         });
       }
-      await refreshWith();
+      await refreshWith([provider.id]);
       return;
     }
     toast.style = Toast.Style.Failure;
@@ -582,7 +609,7 @@ export default function Command() {
       toast.style = Toast.Style.Success;
       toast.title = `${provider.name} connected`;
       toast.message = undefined;
-      await refreshWith();
+      await refreshWith([provider.id]);
     } catch (error) {
       toast.style = Toast.Style.Failure;
       toast.title = `Could not connect ${provider.name}`;
@@ -654,7 +681,7 @@ export default function Command() {
     try {
       const next = await forgetConnections(provider.forget);
       updateConnections(next);
-      await refreshWith();
+      await refreshWith([provider.id]);
     } catch (error) {
       await showToast({
         style: Toast.Style.Failure,
@@ -690,7 +717,7 @@ export default function Command() {
         onConnect={() => void connect(provider)}
         onConnected={(next) => {
           updateConnections(next);
-          void refreshWith();
+          void refreshWith([provider.id]);
         }}
         onDisconnect={() => void disconnect(provider)}
         onSignOut={() => void signOut()}

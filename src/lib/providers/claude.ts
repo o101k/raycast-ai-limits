@@ -325,6 +325,7 @@ async function fallbackToSession(deps: Deps, session: SessionLogin, note: string
         error.hint,
         error.status,
         error.code,
+        error.retryAt,
       );
     }
     throw error;
@@ -343,7 +344,7 @@ async function fallbackAfterDeniedKeychain(deps: Deps, session: SessionLogin): P
     return { ...usage, keychainDenied: true };
   } catch (error) {
     if (error instanceof ProviderError) {
-      throw new ProviderError(error.kind, error.message, error.hint, error.status, "keychain-denied");
+      throw new ProviderError(error.kind, error.message, error.hint, error.status, "keychain-denied", error.retryAt);
     }
     throw error;
   }
