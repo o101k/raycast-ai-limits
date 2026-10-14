@@ -58,6 +58,10 @@ export type ValueSource = "preference" | "connection";
 export interface Settings {
   // The user chose Connect on Claude, which allows reading Claude Code's login from the macOS Keychain.
   claudeKeychain?: boolean;
+  // The config folders the user's shell sets (CLAUDE_CONFIG_DIR and CODEX_HOME), saved by Connect. They are used before
+  // the extension's own environment, since Raycast's environment rarely has them.
+  claudeConfigDir?: string;
+  codexHome?: string;
   claudeSessionKey?: string;
   claudeSessionKeySource?: ValueSource;
   cursorCookie?: string;
@@ -90,8 +94,9 @@ export type ProviderErrorKind =
   | "parse";
 
 // Set on the errors the UI acts on beyond showing them. "keychain-denied" means macOS refused the Keychain read, so the
-// UI turns the Keychain setting off instead of asking macOS again on every refresh.
-export type ProviderErrorCode = "keychain-denied";
+// UI turns the Keychain setting off instead of asking macOS again on every refresh. "account-unsupported" means Google
+// doesn't serve the CLI's quota to this account, so the login is fine and signing in again can't change that.
+export type ProviderErrorCode = "keychain-denied" | "account-unsupported";
 
 export class ProviderError extends Error {
   constructor(

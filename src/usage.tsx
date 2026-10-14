@@ -30,6 +30,7 @@ import {
   ConnectOutcome,
   isConnectOverridden,
   isFallbackOverridden,
+  isStoppableConnect,
   LocalConnectMethod,
   LoginCheck,
   loginCheckFromError,
@@ -82,7 +83,7 @@ function writeCache(usage: Cached) {
 
 // The hook only holds the latest transition and renders it. Every change goes through the pure functions in
 // usage-state.ts, which are tested.
-function useUsage(onKeychainDenied: (request: number) => void) {
+function useUsage(onKeychainDenied: () => void) {
   const [initialCache] = useState(readCache);
   const storeRef = useRef<Transition>({ states: initialStates(PROVIDER_IDS, initialCache), cached: initialCache });
   const [states, setStates] = useState(storeRef.current.states);
@@ -119,7 +120,7 @@ function useUsage(onKeychainDenied: (request: number) => void) {
                 const { states: current, cached } = storeRef.current;
                 commit(applySuccess(current, cached, provider.id, usage));
                 if (usage.keychainDenied) {
-                  onKeychainDenied(request);
+                  onKeychainDenied();
                 }
               }
             },
@@ -129,7 +130,7 @@ function useUsage(onKeychainDenied: (request: number) => void) {
                 const failure = toFailure(error);
                 commit(applyFailure(current, cached, provider.id, failure));
                 if (failure.code === "keychain-denied") {
-                  onKeychainDenied(request);
+                  onKeychainDenied();
                 }
               }
             },
@@ -140,11 +141,7 @@ function useUsage(onKeychainDenied: (request: number) => void) {
     [commit, onKeychainDenied],
   );
 
-  // The number of the latest refresh started. A Connect records it when it starts, so the refreshes before it can be told
-  // apart from the ones after.
-  const latestRequest = useCallback(() => requestCountRef.current, []);
-
-  return { states, refresh, latestRequest };
+  return { states, refresh };
 }
 
 const TONE_COLORS: Record<Tone, Color.ColorLike> = {
@@ -316,8 +313,9 @@ function ProviderItem({
     }
   }
   // Connect goes first when there is nothing to show, or when the saved login was rejected, since that is what the user
-  // needs next. Otherwise it sits after Copy Usage, so Enter still refreshes a working provider.
-  const connectFirst = isNotConnected(state) || failure?.kind === "auth";
+  // needs next. An account Google doesn't serve is not fixed by signing in again, so Connect stays after it. Otherwise
+  // Connect sits after Copy Usage, so Enter still refreshes a working provider.
+  const connectFirst = isNotConnected(state) || (failure?.kind === "auth" && failure.code !== "account-unsupported");
 
   return (
     <List.Item
@@ -447,10 +445,9 @@ export default function Command() {
     return () => controller.abort();
   }, []);
 
-  // The Connect running for each provider, with its AbortController. Disconnect and the Keychain denial stop a Connect
-  // through that. An entry whose controller has aborted is no longer running, so a new Connect may replace it. The number
-  // is the last refresh started before that Connect, which onKeychainDenied uses.
-  const connectAbortsRef = useRef(new Map<ProviderId, { controller: AbortController; refreshesBefore: number }>());
+  // The Connect running for each provider, with its AbortController. Disconnect stops a Connect through that. An entry
+  // whose controller has aborted is no longer running, so a new Connect may replace it.
+  const connectAbortsRef = useRef(new Map<ProviderId, AbortController>());
 
   const settings = toSettings(preferences, connections, gitHubToken);
   // The settings from the latest GitHub token and connections. Connect and the refreshes after it use these, not the
@@ -460,22 +457,12 @@ export default function Command() {
   }
 
   // macOS refused the Keychain read during a refresh. The setting is turned off so later refreshes don't ask again, and
-  // choosing Connect turns it on again. A Claude Connect already running is stopped when this refresh started before it:
-  // the refresh used the setting from before, so turning the setting off now would undo the Connect's own consent. A
-  // refresh that started after the Connect is about the Connect's read, so the Connect owns the consent and nothing is
-  // saved here.
-  const onKeychainDenied = useCallback(
-    (request: number) => {
-      const claudeConnect = connectAbortsRef.current.get("claude");
-      if (claudeConnect && request > claudeConnect.refreshesBefore) {
-        return;
-      }
-      void saveConnections({ claudeKeychain: false }).then(updateConnections, () => undefined);
-      claudeConnect?.controller.abort();
-    },
-    [updateConnections],
-  );
-  const { states, refresh, latestRequest } = useUsage(onKeychainDenied);
+  // choosing Connect turns it on again. A Claude Connect that is running is left alone: its own verify and sign-in
+  // decide its outcome.
+  const onKeychainDenied = useCallback(() => {
+    void saveConnections({ claudeKeychain: false }).then(updateConnections, () => undefined);
+  }, [updateConnections]);
+  const { states, refresh } = useUsage(onKeychainDenied);
 
   // The first refresh waits for the GitHub token and the saved connections, and then runs once.
   const startedRef = useRef(false);
@@ -606,16 +593,27 @@ export default function Command() {
 
   // Runs the Connect action for a provider. API key providers never get here, since their action opens a form instead.
   // A second Connect for a provider that is still connecting is refused, so two sign-ins never run at once. A Connect
-  // that was stopped no longer counts as running, so a new one replaces it.
+  // that was stopped no longer counts as running, so a new one replaces it. A local sign-in that is waiting can be
+  // stopped from that refusal with Start Over, so a sign-in left waiting doesn't block the retry.
   async function connect(provider: Provider): Promise<void> {
     const running = connectAbortsRef.current.get(provider.id);
-    if (running && !running.controller.signal.aborted) {
-      await showToast({ title: `Already connecting ${provider.name}` });
+    if (running && !running.signal.aborted) {
+      await showToast({
+        title: `Already connecting ${provider.name}`,
+        primaryAction: isStoppableConnect(provider.connect)
+          ? {
+              title: "Start Over",
+              onAction: () => {
+                running.abort();
+                void connect(provider);
+              },
+            }
+          : undefined,
+      });
       return;
     }
     const controller = new AbortController();
-    const entry = { controller, refreshesBefore: latestRequest() };
-    connectAbortsRef.current.set(provider.id, entry);
+    connectAbortsRef.current.set(provider.id, controller);
     const signal = AbortSignal.any([controller.signal, ...(closeRef.current ? [closeRef.current.signal] : [])]);
     try {
       const method = provider.connect;
@@ -637,7 +635,7 @@ export default function Command() {
       }
     } finally {
       // A stopped Connect can still be finishing when its replacement starts, so it only removes its own entry.
-      if (connectAbortsRef.current.get(provider.id) === entry) {
+      if (connectAbortsRef.current.get(provider.id) === controller) {
         connectAbortsRef.current.delete(provider.id);
       }
     }
@@ -646,7 +644,7 @@ export default function Command() {
   // Removes what Connect saved for this provider. Keys typed into the preferences stay, since the user owns those.
   async function disconnect(provider: Provider) {
     // A Connect still running for this provider is stopped first, so it can't save a login after the forget.
-    connectAbortsRef.current.get(provider.id)?.controller.abort();
+    connectAbortsRef.current.get(provider.id)?.abort();
     try {
       const next = await forgetConnections(provider.forget);
       updateConnections(next);

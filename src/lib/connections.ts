@@ -6,6 +6,8 @@ import type { Settings } from "./types";
 export type Connections = Pick<
   Settings,
   | "claudeKeychain"
+  | "claudeConfigDir"
+  | "codexHome"
   | "claudeSessionKey"
   | "cursorCookie"
   | "openrouterApiKey"
@@ -18,6 +20,8 @@ export type Connections = Pick<
 >;
 
 const TEXT_FIELDS = [
+  "claudeConfigDir",
+  "codexHome",
   "claudeSessionKey",
   "cursorCookie",
   "openrouterApiKey",
@@ -29,9 +33,9 @@ const TEXT_FIELDS = [
 
 const REGION_FIELDS = ["zaiRegion", "moonshotRegion"] as const;
 
-// Keeps only the fields with the right type. Strings are trimmed and dropped when empty, a region must be one of the two
-// known values, and claudeKeychain counts only when it is exactly true. Anything else is dropped, so a damaged or
-// hand-edited value can never produce a setting the providers don't expect.
+// Keeps only the fields with the right type. Strings are trimmed and dropped when empty, so saving "" clears one. A
+// region must be one of the two known values, and claudeKeychain counts only when it is exactly true. Anything else is
+// dropped, so a damaged or hand-edited value can never produce a setting the providers don't expect.
 function normalize(record: Record<string, unknown>): Connections {
   const connections: Connections = {};
   if (record.claudeKeychain === true) {

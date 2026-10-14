@@ -208,6 +208,18 @@ describe("fetchClaudeUsage with the Claude Code credentials file", () => {
     expect(deps.requests).toHaveLength(1);
   });
 
+  it("reads the credentials file from the folder in settings before CLAUDE_CONFIG_DIR", async () => {
+    const deps = fakeDeps({
+      files: { "/Volumes/shell/claude/.credentials.json": oauthCredentials({}) },
+      routes: [oauthRoute(USAGE_JSON)],
+    });
+    deps.env.CLAUDE_CONFIG_DIR = "/Volumes/work/claude";
+
+    await fetchClaudeUsage(deps, { claudeConfigDir: "/Volumes/shell/claude" });
+
+    expect(deps.requests).toHaveLength(1);
+  });
+
   it("accepts a login with no scopes field and one with an empty scopes list", async () => {
     const withoutScopes = fakeDeps({
       files: { [CREDENTIALS]: JSON.stringify({ claudeAiOauth: { accessToken: "oauth-token-123" } }) },
@@ -604,6 +616,17 @@ describe("fetchClaudeUsage with the Claude Code Keychain login", () => {
     await fetchClaudeUsage(deps, KEYCHAIN);
 
     const hash = createHash("sha256").update("/Volumes/work/claude").digest("hex").slice(0, 8);
+    expect(deps.runCalls[0].args).toEqual(["find-generic-password", "-s", `Claude Code-credentials-${hash}`, "-w"]);
+  });
+
+  it("looks up the Keychain item for the folder in settings before CLAUDE_CONFIG_DIR", async () => {
+    const deps = fakeDeps({ routes: [oauthRoute(USAGE_JSON)] });
+    deps.env.CLAUDE_CONFIG_DIR = "/Volumes/work/claude";
+    deps.programs.push(keychainAnswer(0, `${oauthCredentials({})}\n`));
+
+    await fetchClaudeUsage(deps, { ...KEYCHAIN, claudeConfigDir: "/Volumes/shell/claude" });
+
+    const hash = createHash("sha256").update("/Volumes/shell/claude").digest("hex").slice(0, 8);
     expect(deps.runCalls[0].args).toEqual(["find-generic-password", "-s", `Claude Code-credentials-${hash}`, "-w"]);
   });
 

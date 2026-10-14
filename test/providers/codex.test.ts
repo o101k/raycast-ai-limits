@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { fakeDeps, fakeJwt, HOME, NOW } from "../fake-deps";
 import { fetchCodexUsage, parseCodexUsage } from "../../src/lib/providers/codex";
-import { ProviderError } from "../../src/lib/types";
+import { ProviderError, Settings } from "../../src/lib/types";
 
 const AUTH_FILE = `${HOME}/.codex/auth.json`;
 const USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
+const NO_SETTINGS: Settings = {};
 
 const ID_TOKEN = fakeJwt({
   email: "omar@example.com",
@@ -150,7 +151,7 @@ describe("fetchCodexUsage", () => {
       routes: [usageRoute({ error: "expired" }, 401)],
     });
 
-    const error = await fetchCodexUsage(deps).catch((caught: unknown) => caught);
+    const error = await fetchCodexUsage(deps, NO_SETTINGS).catch((caught: unknown) => caught);
 
     expect(error).toMatchObject({
       kind: "auth",
@@ -168,8 +169,8 @@ describe("fetchCodexUsage", () => {
       routes: [usageRoute({}, 401)],
     });
 
-    await expect(fetchCodexUsage(recent)).rejects.toMatchObject({ hint: AUTH_HINT_TEXT });
-    await expect(fetchCodexUsage(missing)).rejects.toMatchObject({ hint: AUTH_HINT_TEXT });
+    await expect(fetchCodexUsage(recent, NO_SETTINGS)).rejects.toMatchObject({ hint: AUTH_HINT_TEXT });
+    await expect(fetchCodexUsage(missing, NO_SETTINGS)).rejects.toMatchObject({ hint: AUTH_HINT_TEXT });
   });
 
   it("sends the access token and account id, and maps the result", async () => {
@@ -185,7 +186,7 @@ describe("fetchCodexUsage", () => {
       routes: [usageRoute()],
     });
 
-    const usage = await fetchCodexUsage(deps);
+    const usage = await fetchCodexUsage(deps, NO_SETTINGS);
 
     expect(deps.requests).toHaveLength(1);
     expect(deps.requests[0]).toMatchObject({ url: USAGE_URL, method: "GET" });
@@ -214,7 +215,7 @@ describe("fetchCodexUsage", () => {
       routes: [usageRoute()],
     });
 
-    const usage = await fetchCodexUsage(deps);
+    const usage = await fetchCodexUsage(deps, NO_SETTINGS);
 
     expect(deps.requests[0].headers).toMatchObject({
       authorization: "Bearer access-camel",
@@ -229,7 +230,7 @@ describe("fetchCodexUsage", () => {
       routes: [usageRoute()],
     });
 
-    await fetchCodexUsage(deps);
+    await fetchCodexUsage(deps, NO_SETTINGS);
 
     expect(deps.requests[0].headers["chatgpt-account-id"]).toBe("acct_jwt_987");
   });
@@ -240,7 +241,7 @@ describe("fetchCodexUsage", () => {
       routes: [usageRoute()],
     });
 
-    const usage = await fetchCodexUsage(deps);
+    const usage = await fetchCodexUsage(deps, NO_SETTINGS);
 
     expect(deps.requests[0].headers["chatgpt-account-id"]).toBeUndefined();
     expect(usage.account).toBeUndefined();
@@ -253,7 +254,19 @@ describe("fetchCodexUsage", () => {
     });
     deps.env.CODEX_HOME = "/Volumes/work/codex";
 
-    await fetchCodexUsage(deps);
+    await fetchCodexUsage(deps, NO_SETTINGS);
+
+    expect(deps.requests).toHaveLength(1);
+  });
+
+  it("reads auth.json from the folder in settings before CODEX_HOME", async () => {
+    const deps = fakeDeps({
+      files: { "/Volumes/shell/codex/auth.json": authFile({ access_token: "access-token-abc" }) },
+      routes: [usageRoute()],
+    });
+    deps.env.CODEX_HOME = "/Volumes/work/codex";
+
+    await fetchCodexUsage(deps, { codexHome: "/Volumes/shell/codex" });
 
     expect(deps.requests).toHaveLength(1);
   });
@@ -261,7 +274,7 @@ describe("fetchCodexUsage", () => {
   it("is not-connected when the Codex CLI has never signed in", async () => {
     const deps = fakeDeps();
 
-    const error = await fetchCodexUsage(deps).catch((caught: unknown) => caught);
+    const error = await fetchCodexUsage(deps, NO_SETTINGS).catch((caught: unknown) => caught);
 
     expect(error).toMatchObject({ kind: "not-connected" });
     expect((error as ProviderError).hint).toContain("codex login");
@@ -273,7 +286,7 @@ describe("fetchCodexUsage", () => {
       files: { [AUTH_FILE]: JSON.stringify({ OPENAI_API_KEY: "sk-proj-secret", tokens: null }) },
     });
 
-    const error = await fetchCodexUsage(deps).catch((caught: unknown) => caught);
+    const error = await fetchCodexUsage(deps, NO_SETTINGS).catch((caught: unknown) => caught);
 
     expect(error).toMatchObject({ kind: "not-connected", message: "Codex is using an API key" });
     expect((error as ProviderError).hint).toContain("Sign in with ChatGPT");
@@ -284,7 +297,7 @@ describe("fetchCodexUsage", () => {
   it("throws a parse error for a malformed auth.json", async () => {
     const deps = fakeDeps({ files: { [AUTH_FILE]: '{"tokens": {"access_token": ' } });
 
-    await expect(fetchCodexUsage(deps)).rejects.toMatchObject({ kind: "parse" });
+    await expect(fetchCodexUsage(deps, NO_SETTINGS)).rejects.toMatchObject({ kind: "parse" });
     expect(deps.requests).toEqual([]);
   });
 
@@ -294,7 +307,7 @@ describe("fetchCodexUsage", () => {
       routes: [usageRoute({ error: { code: "token_expired" } }, status)],
     });
 
-    const error = await fetchCodexUsage(deps).catch((caught: unknown) => caught);
+    const error = await fetchCodexUsage(deps, NO_SETTINGS).catch((caught: unknown) => caught);
 
     expect(error).toMatchObject({
       kind: "auth",
@@ -311,6 +324,6 @@ describe("fetchCodexUsage", () => {
       routes: [usageRoute({ plan_type: "plus" })],
     });
 
-    await expect(fetchCodexUsage(deps)).rejects.toMatchObject({ kind: "parse" });
+    await expect(fetchCodexUsage(deps, NO_SETTINGS)).rejects.toMatchObject({ kind: "parse" });
   });
 });

@@ -94,6 +94,8 @@ export async function fetchGeminiUsage(deps: Deps): Promise<ProviderUsage> {
         "auth",
         "Google no longer serves Gemini CLI quota for personal accounts",
         CONSUMER_RETIRED_HINT,
+        undefined,
+        "account-unsupported",
       );
     }
     throw error;

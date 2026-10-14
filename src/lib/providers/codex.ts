@@ -10,7 +10,7 @@ import {
   requestJson,
   titleCase,
 } from "../http";
-import { Balance, ProviderError, ProviderUsage, UsageWindow } from "../types";
+import { Balance, ProviderError, ProviderUsage, Settings, UsageWindow } from "../types";
 
 const USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
 const AUTH_HINT = "Run `codex` in a terminal to refresh your login";
@@ -46,9 +46,9 @@ interface CodexTokens {
 }
 
 // Refresh tokens are deliberately not read. The Codex CLI rotates them, and refreshing here would sign it out.
-// Codex has no user settings, so the registry's (deps, settings) call is satisfied by this shorter signature.
-export async function fetchCodexUsage(deps: Deps): Promise<ProviderUsage> {
-  const tokens = await readTokens(deps);
+// The only setting is the folder the login is in, which Connect saves from the user's shell.
+export async function fetchCodexUsage(deps: Deps, settings: Settings): Promise<ProviderUsage> {
+  const tokens = await readTokens(deps, settings);
 
   const idPayload = tokens.idToken ? decodeJwtPayload(tokens.idToken) : undefined;
   const authClaim = asRecord(idPayload?.[AUTH_CLAIM]);
@@ -83,8 +83,9 @@ export async function fetchCodexUsage(deps: Deps): Promise<ProviderUsage> {
   };
 }
 
-async function readTokens(deps: Deps): Promise<CodexTokens> {
-  const home = deps.env.CODEX_HOME || `${deps.homedir}/.codex`;
+async function readTokens(deps: Deps, settings: Settings): Promise<CodexTokens> {
+  // The folder Codex is signed in to: the one Connect saved from the user's shell, else Raycast's environment.
+  const home = settings.codexHome || deps.env.CODEX_HOME || `${deps.homedir}/.codex`;
   const text = await deps.readFile(`${home}/auth.json`);
   if (text === null) {
     throw new ProviderError("not-connected", "No Codex login found", NOT_CONNECTED_HINT);

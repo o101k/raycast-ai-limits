@@ -69,6 +69,12 @@ describe("parseConnections", () => {
     expect(parseConnections(JSON.stringify({ zaiRegion: true, moonshotRegion: 1 }))).toEqual({});
   });
 
+  it("keeps the config folders, trimmed, and drops empty ones", () => {
+    expect(parseConnections(JSON.stringify({ claudeConfigDir: " /work/claude ", codexHome: "   " }))).toEqual({
+      claudeConfigDir: "/work/claude",
+    });
+  });
+
   it("counts claudeKeychain only when it is exactly true", () => {
     expect(parseConnections(JSON.stringify({ claudeKeychain: true }))).toEqual({ claudeKeychain: true });
     expect(parseConnections(JSON.stringify({ claudeKeychain: false }))).toEqual({});
@@ -100,6 +106,8 @@ describe("serializeConnections", () => {
   it("round-trips through parseConnections", () => {
     const connections: Connections = {
       claudeKeychain: true,
+      claudeConfigDir: "/work/claude",
+      codexHome: "/work/codex",
       zaiApiKey: "z-key",
       zaiRegion: "china",
       moonshotRegion: "global",
@@ -133,6 +141,14 @@ describe("mergeConnections", () => {
       },
     );
     expect(merged).toEqual({});
+  });
+
+  it("clears a config folder saved as an empty string, which is how Connect clears one the shell doesn't set", () => {
+    const merged = mergeConnections(
+      { claudeConfigDir: "/work/claude", codexHome: "/work/codex" },
+      { claudeConfigDir: "", codexHome: "/work/new" },
+    );
+    expect(merged).toEqual({ codexHome: "/work/new" });
   });
 
   it("does not change the current value it was given", () => {

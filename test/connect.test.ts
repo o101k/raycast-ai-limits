@@ -5,6 +5,7 @@ import {
   ConnectUi,
   isConnectOverridden,
   isFallbackOverridden,
+  isStoppableConnect,
   LocalConnectMethod,
   LoginCheck,
   loginCheckFromError,
@@ -13,6 +14,7 @@ import { Connections } from "../src/lib/connections";
 import { RunResult } from "../src/lib/deps";
 import { claudeKeychainService } from "../src/lib/keychain";
 import { fetchClaudeUsage } from "../src/lib/providers/claude";
+import { fetchGeminiUsage } from "../src/lib/providers/gemini";
 import { STATE_DB } from "../src/lib/providers/cursor";
 import { CURSOR_BUNDLE_ID } from "../src/lib/sign-in";
 import { ProviderError, Settings } from "../src/lib/types";
@@ -28,6 +30,9 @@ const GEMINI_BIN = "/opt/homebrew/bin/gemini";
 const CLAUDE_CREDENTIALS = `${HOME}/.claude/.credentials.json`;
 const CODEX_AUTH = `${HOME}/.codex/auth.json`;
 const GEMINI_CREDENTIALS = `${HOME}/.gemini/oauth_creds.json`;
+const GEMINI_LOAD_URL = "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist";
+const GEMINI_QUOTA_URL = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota";
+const GEMINI_LOGIN = JSON.stringify({ access_token: "gemini-access", expiry_date: NOW + 3_600_000 });
 const CURSOR_DB = `${HOME}${STATE_DB}`;
 const POLL_TOTAL_MS = 10 * 60_000;
 const POLL_INTERVAL_MS = 3_000;
@@ -83,12 +88,22 @@ function inOrder(...answers: RunResult[]): () => RunResult {
   return () => answers[Math.min(call++, answers.length - 1)];
 }
 
-// Each sign-in looks for its CLI on the user's PATH, which comes from the login shell. fakeDeps has no SHELL, so the
-// default /bin/zsh answers with a PATH that has Homebrew on it. The tools listed are the executables on that PATH.
-function withTools(deps: FakeDeps, tools: string[] = []): FakeDeps {
+// Each sign-in looks for its CLI on the user's PATH, and reads the config folders the user's shell sets, both from the
+// login shell. fakeDeps has no SHELL, so the default /bin/zsh answers with a PATH that has Homebrew on it. The tools
+// listed are the executables on that PATH, and `shellFolders` are the folders the shell sets (none by default).
+function withTools(
+  deps: FakeDeps,
+  tools: string[] = [],
+  shellFolders: { claudeConfigDir?: string; codexHome?: string } = {},
+): FakeDeps {
+  const folders = `${shellFolders.claudeConfigDir ?? ""}__AI_LIMITS__${shellFolders.codexHome ?? ""}`;
   deps.programs.push({
     file: SHELL,
-    respond: { exitCode: 0, stdout: "__AI_LIMITS__/opt/homebrew/bin:/usr/bin__AI_LIMITS__", stderr: "" },
+    respond: {
+      exitCode: 0,
+      stdout: `__AI_LIMITS__/opt/homebrew/bin:/usr/bin__AI_LIMITS__${folders}__AI_LIMITS__`,
+      stderr: "",
+    },
   });
   for (const tool of tools) {
     deps.executables.add(tool);
@@ -170,6 +185,18 @@ function claudeVerify(deps: FakeDeps): () => Promise<LoginCheck> {
   };
 }
 
+// The check usage.tsx runs for Gemini: the Gemini CLI's login alone, read the way a refresh reads it.
+function geminiVerify(deps: FakeDeps): () => Promise<LoginCheck> {
+  return async () => {
+    try {
+      await fetchGeminiUsage(deps);
+      return "ok";
+    } catch (error) {
+      return loginCheckFromError(error);
+    }
+  };
+}
+
 const CLAUDE: LocalConnectMethod = { kind: "claude" };
 const CODEX: LocalConnectMethod = { kind: "codex" };
 const GEMINI: LocalConnectMethod = { kind: "gemini" };
@@ -191,7 +218,7 @@ describe("connectLocal for Claude Code on macOS", () => {
     await connectLocal(deps, CLAUDE, ui);
 
     expect(consentAtRead).toBe(1);
-    expect(saved).toEqual([{ claudeKeychain: true }]);
+    expect(saved).toEqual([{ claudeKeychain: true, claudeConfigDir: "" }]);
   });
 
   it("connects without signing in when the Keychain login works, and reads no password itself", async () => {
@@ -204,7 +231,7 @@ describe("connectLocal for Claude Code on macOS", () => {
       "Connecting Claude Code",
       "If macOS asks for access to Claude Code's login, choose Always Allow",
     );
-    expect(deps.runCalls.map((call) => call.file)).toEqual([SECURITY]);
+    expect(deps.runCalls.map((call) => call.file)).toEqual([SHELL, SECURITY]);
     expect(passwordReads(deps)).toBe(0);
   });
 
@@ -215,7 +242,11 @@ describe("connectLocal for Claude Code on macOS", () => {
 
     await connectLocal(deps, CLAUDE, testUi().ui);
 
-    expect(deps.runCalls[0].args).toEqual(["find-generic-password", "-s", claudeKeychainService("/work/claude", HOME)]);
+    expect(deps.runCalls.find((call) => call.file === SECURITY)?.args).toEqual([
+      "find-generic-password",
+      "-s",
+      claudeKeychainService("/work/claude", HOME),
+    ]);
   });
 
   it("signs in again when verify says the Keychain login was rejected, and connects once it changes", async () => {
@@ -270,7 +301,7 @@ describe("connectLocal for Claude Code on macOS", () => {
       title: "macOS denied access to Claude Code's login",
       message: "Choose Connect again and click Always Allow",
     });
-    expect(saved).toEqual([{ claudeKeychain: true }, { claudeKeychain: false }]);
+    expect(saved).toEqual([{ claudeKeychain: true, claudeConfigDir: "" }, { claudeKeychain: false }]);
     expect(terminalScript(deps)).toBeUndefined();
     expect(progress).not.toHaveBeenCalledWith("Finish signing in in Terminal", expect.anything());
   });
@@ -285,7 +316,7 @@ describe("connectLocal for Claude Code on macOS", () => {
       title: "macOS denied access to Claude Code's login",
       message: "Choose Connect again and click Always Allow",
     });
-    expect(saved).toEqual([{ claudeKeychain: true }, { claudeKeychain: false }]);
+    expect(saved).toEqual([{ claudeKeychain: true, claudeConfigDir: "" }, { claudeKeychain: false }]);
   });
 
   it("reads the Keychain password once in a full Connect with a working login, inside verify", async () => {
@@ -335,7 +366,7 @@ describe("connectLocal for Claude Code on macOS", () => {
     deps.programs.push({ file: SECURITY, respond: MISSING });
 
     expect(await connectLocal(deps, CLAUDE, testUi().ui)).toEqual({ kind: "connected" });
-    expect(deps.runCalls.map((call) => call.file)).toEqual([SECURITY]);
+    expect(deps.runCalls.map((call) => call.file)).toEqual([SHELL, SECURITY]);
   });
 
   it("signs in again when verify rejects the credentials file, and connects once the file changes", async () => {
@@ -365,7 +396,7 @@ describe("connectLocal for Claude Code on macOS", () => {
       message: "Install Claude Code, then choose Connect again",
       help: { title: "Install Claude Code", url: "https://code.claude.com/docs/en/setup" },
     });
-    expect(saved).toEqual([{ claudeKeychain: true }, { claudeKeychain: false }]);
+    expect(saved).toEqual([{ claudeKeychain: true, claudeConfigDir: "" }, { claudeKeychain: false }]);
     expect(progress).not.toHaveBeenCalledWith("Finish signing in in Terminal", expect.anything());
   });
 
@@ -405,6 +436,31 @@ describe("connectLocal for Claude Code on macOS", () => {
     );
   });
 
+  it("uses the config folder the user's shell sets over the extension's, and saves it with the Keychain setting", async () => {
+    const deps = withTools(fakeDeps(), [CLAUDE_BIN], { claudeConfigDir: "/work/shell-claude" });
+    deps.env.CLAUDE_CONFIG_DIR = "/work/env-claude";
+    deps.programs.push({ file: SECURITY, respond: MISSING });
+    deps.programs.push({
+      file: OSASCRIPT,
+      respond: () => {
+        deps.files.set("/work/shell-claude/.credentials.json", "{}");
+        return OK;
+      },
+    });
+    const { ui, saved } = testUi();
+
+    expect(await connectLocal(deps, CLAUDE, ui)).toEqual({ kind: "connected" });
+    expect(saved).toEqual([{ claudeKeychain: true, claudeConfigDir: "/work/shell-claude" }]);
+    expect(deps.runCalls.find((call) => call.file === SECURITY)?.args).toEqual([
+      "find-generic-password",
+      "-s",
+      claudeKeychainService("/work/shell-claude", HOME),
+    ]);
+    expect(terminalScript(deps)).toContain(
+      `do script "'/usr/bin/env' 'CLAUDE_CONFIG_DIR=/work/shell-claude' '${CLAUDE_BIN}' 'auth' 'login'"`,
+    );
+  });
+
   it("says Raycast needs permission to control Terminal when macOS refuses it", async () => {
     const deps = withTools(fakeDeps(), [CLAUDE_BIN]);
     deps.programs.push({ file: SECURITY, respond: MISSING });
@@ -420,13 +476,13 @@ describe("connectLocal for Claude Code on macOS", () => {
 
 describe("connectLocal for Claude Code on other platforms", () => {
   it("connects from the credentials file without touching the Keychain", async () => {
-    const deps = fakeDeps({ files: { [CLAUDE_CREDENTIALS]: "{}" } });
+    const deps = withTools(fakeDeps({ files: { [CLAUDE_CREDENTIALS]: "{}" } }));
     deps.platform = "linux";
     const { ui, saved } = testUi();
 
     expect(await connectLocal(deps, CLAUDE, ui)).toEqual({ kind: "connected" });
-    expect(deps.runCalls).toEqual([]);
-    expect(saved).toEqual([{ claudeKeychain: true }]);
+    expect(deps.runCalls.map((call) => call.file)).toEqual([SHELL]);
+    expect(saved).toEqual([{ claudeKeychain: true, claudeConfigDir: "" }]);
   });
 
   it("reads the credentials file from CLAUDE_CONFIG_DIR when it is set", async () => {
@@ -482,12 +538,12 @@ describe("connectLocal for Claude Code on other platforms", () => {
 });
 
 describe("connectLocal for Codex", () => {
-  it("connects without running anything when the saved login works", async () => {
+  it("connects without opening Terminal when the saved login works, and runs only the login shell", async () => {
     const deps = withTools(fakeDeps({ files: { [CODEX_AUTH]: "{}" } }), [CODEX_BIN]);
     const { ui, progress } = testUi();
 
     expect(await connectLocal(deps, CODEX, ui)).toEqual({ kind: "connected" });
-    expect(deps.runCalls).toEqual([]);
+    expect(deps.runCalls.map((call) => call.file)).toEqual([SHELL]);
     expect(progress).not.toHaveBeenCalled();
   });
 
@@ -539,6 +595,27 @@ describe("connectLocal for Codex", () => {
     expect(await connectLocal(deps, CODEX, testUi().ui)).toEqual({ kind: "connected" });
     expect(terminalScript(deps)).toContain(
       `do script "'/usr/bin/env' 'CODEX_HOME=/work/codex' '${CODEX_BIN}' 'login'"`,
+    );
+  });
+
+  it("takes CODEX_HOME from the user's shell over the extension's, reads that folder and saves it", async () => {
+    const deps = withTools(fakeDeps({ files: { "/work/shell-codex/auth.json": "{}" } }), [CODEX_BIN], {
+      codexHome: "/work/shell-codex",
+    });
+    deps.env.CODEX_HOME = "/work/env-codex";
+    deps.programs.push({
+      file: OSASCRIPT,
+      respond: () => {
+        deps.files.set("/work/shell-codex/auth.json", '{"renewed":true}');
+        return OK;
+      },
+    });
+    const { ui, saved } = testUi({ verify: async () => "broken" });
+
+    expect(await connectLocal(deps, CODEX, ui)).toEqual({ kind: "connected" });
+    expect(saved).toEqual([{ codexHome: "/work/shell-codex" }]);
+    expect(terminalScript(deps)).toContain(
+      `do script "'/usr/bin/env' 'CODEX_HOME=/work/shell-codex' '${CODEX_BIN}' 'login'"`,
     );
   });
 
@@ -630,6 +707,19 @@ describe("connectLocal for Gemini CLI", () => {
       "Choose Sign in with Google, then come back",
     );
     expect(terminalScript(deps)).toContain(`do script "'${GEMINI_BIN}'"`);
+  });
+
+  it("connects without opening Terminal when Google refuses quota for a personal account, since signing in again can't change that", async () => {
+    const deps = withTools(fakeDeps({ files: { [GEMINI_CREDENTIALS]: GEMINI_LOGIN } }), [GEMINI_BIN]);
+    deps.routes.push(
+      { prefix: GEMINI_LOAD_URL, respond: { body: { ineligibleTiers: [{ reasonCode: "UNSUPPORTED_CLIENT" }] } } },
+      { prefix: GEMINI_QUOTA_URL, respond: { status: 403, body: {} } },
+    );
+    const { ui, progress } = testUi({ verify: geminiVerify(deps) });
+
+    expect(await connectLocal(deps, GEMINI, ui)).toEqual({ kind: "connected" });
+    expect(progress).not.toHaveBeenCalled();
+    expect(terminalScript(deps)).toBeUndefined();
   });
 
   it("gives up after 10 minutes without a login, checking every 3 seconds", async () => {
@@ -910,6 +1000,12 @@ describe("loginCheckFromError", () => {
     );
   });
 
+  it("is ok for an account-unsupported error, since the login works and signing in again would change nothing", () => {
+    expect(
+      loginCheckFromError(new ProviderError("auth", "not served", undefined, undefined, "account-unsupported")),
+    ).toBe("ok");
+  });
+
   it.each(["auth", "not-connected", "parse"] as const)(
     "is broken for a %s error, which is a rejected, missing or unreadable login",
     (kind) => {
@@ -923,6 +1019,19 @@ describe("loginCheckFromError", () => {
 
   it("is ok for an error that isn't a ProviderError, such as no network", () => {
     expect(loginCheckFromError(new TypeError("fetch failed"))).toBe("ok");
+  });
+});
+
+describe("isStoppableConnect", () => {
+  it("is true for the local sign-ins, which stop when their signal aborts", () => {
+    for (const method of [CLAUDE, CODEX, GEMINI, CURSOR]) {
+      expect(isStoppableConnect(method)).toBe(true);
+    }
+  });
+
+  it("is false for the OAuth sign-ins, which Raycast's browser flow runs and can't stop", () => {
+    expect(isStoppableConnect({ kind: "github" })).toBe(false);
+    expect(isStoppableConnect({ kind: "openrouter" })).toBe(false);
   });
 });
 

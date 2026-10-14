@@ -212,11 +212,13 @@ function checkOAuthUsable(credential: OAuthCredential, now: number): { message: 
 }
 
 async function readOAuthCredential(deps: Deps, settings: Settings): Promise<OAuthState> {
+  // The folder Claude Code is signed in to: the one Connect saved from the user's shell, else Raycast's environment.
+  const configDir = settings.claudeConfigDir || deps.env.CLAUDE_CONFIG_DIR;
   if (settings.claudeKeychain) {
     // Claude Code writes a fresh login to the Keychain and can leave the credentials file next to it stale, so the
     // Keychain is read first. A missing item, or one with no login in it, falls through to the file. A denied read does
     // not: the file may be the stale copy, and using it would show limits for a login Claude Code has already replaced.
-    const keychain = await readKeychainPassword(deps, claudeKeychainService(deps.env.CLAUDE_CONFIG_DIR, deps.homedir));
+    const keychain = await readKeychainPassword(deps, claudeKeychainService(configDir, deps.homedir));
     if (keychain.kind === "denied") {
       return { kind: "denied" };
     }
@@ -228,8 +230,8 @@ async function readOAuthCredential(deps: Deps, settings: Settings): Promise<OAut
     }
   }
 
-  const configDir = deps.env.CLAUDE_CONFIG_DIR || `${deps.homedir}/.claude`;
-  const text = await deps.readFile(`${configDir}/.credentials.json`);
+  const folder = configDir || `${deps.homedir}/.claude`;
+  const text = await deps.readFile(`${folder}/.credentials.json`);
   if (text === null) {
     return { kind: "absent" };
   }

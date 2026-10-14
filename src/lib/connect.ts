@@ -11,7 +11,7 @@ import {
   readCodexLogin,
   readCursorLogin,
   readGeminiLogin,
-  resolveUserPath,
+  resolveUserEnv,
   waitFor,
 } from "./sign-in";
 
@@ -40,6 +40,12 @@ export type ConnectMethod =
 
 export type LocalConnectMethod = Extract<ConnectMethod, { kind: "claude" | "codex" | "gemini" | "cursor" }>;
 
+// Whether a Connect can be stopped while it runs. The local sign-ins wait on a CLI or the app on this Mac, which stops
+// when the signal aborts. The OAuth ones run in Raycast's browser flow, which can't be stopped, so a retry waits for them.
+export function isStoppableConnect(method: ConnectMethod): method is LocalConnectMethod {
+  return method.kind === "claude" || method.kind === "codex" || method.kind === "gemini" || method.kind === "cursor";
+}
+
 // What verify found. "ok" means the provider answered. "broken" means the provider rejected the login, can't find one or
 // can't read it. "denied" means macOS refused the Keychain read, which says nothing about whether the login is good.
 export type LoginCheck = "ok" | "broken" | "denied";
@@ -48,10 +54,14 @@ export type LoginCheck = "ok" | "broken" | "denied";
 const BROKEN_KINDS = new Set<ProviderErrorKind>(["auth", "not-connected", "parse"]);
 
 // Turns the error from a provider's fetch into a check. A login that is rejected, missing or unreadable is "broken". A
-// failure that is none of those (no network, for example) says nothing about the login, so it counts as "ok" too.
+// failure that is none of those (no network, for example) says nothing about the login, so it counts as "ok" too. An
+// account the provider doesn't serve counts as "ok" as well: the login works, and signing in again would change nothing.
 export function loginCheckFromError(error: unknown): LoginCheck {
   if (error instanceof ProviderError && error.code === "keychain-denied") {
     return "denied";
+  }
+  if (error instanceof ProviderError && error.code === "account-unsupported") {
+    return "ok";
   }
   if (error instanceof ProviderError && BROKEN_KINDS.has(error.kind)) {
     return "broken";
@@ -144,14 +154,22 @@ async function connectClaude(deps: Deps, ui: ConnectUi): Promise<ConnectOutcome>
   if (ui.signal?.aborted) {
     return STOPPED;
   }
-  await ui.save({ claudeKeychain: true });
+  // The login shell is asked first, for the PATH and the config folder Claude Code is signed in to. No login is read.
+  const env = await resolveUserEnv(deps);
+  // A Connect stopped while the shell ran must not save, since Disconnect may have run.
+  if (ui.signal?.aborted) {
+    return STOPPED;
+  }
+  // The folder is saved with the setting, before any login is read, so the reads below and every later refresh use it.
+  await ui.save({ claudeKeychain: true, claudeConfigDir: env.claudeConfigDir ?? "" });
   ui.progress("Connecting Claude Code", "If macOS asks for access to Claude Code's login, choose Always Allow");
 
+  const configDir = env.claudeConfigDir || deps.env.CLAUDE_CONFIG_DIR;
   // The marker comes from the item's attributes, which never open macOS's access dialog.
-  const before = await readClaudeMarker(deps);
+  const before = await readClaudeMarker(deps, configDir);
   // With no login there is nothing to verify, so the sign-in starts at once.
   if (before === null) {
-    return signInClaude(deps, ui, before);
+    return signInClaude(deps, ui, env.path, configDir, before);
   }
   // A Connect stopped while the setting was saved doesn't verify.
   if (ui.signal?.aborted) {
@@ -166,7 +184,7 @@ async function connectClaude(deps: Deps, ui: ConnectUi): Promise<ConnectOutcome>
   if (check === "denied") {
     return keychainDenied(ui);
   }
-  return signInClaude(deps, ui, before);
+  return signInClaude(deps, ui, env.path, configDir, before);
 }
 
 // Turning the setting back off stops later refreshes from asking macOS again. Choosing Connect turns it on again.
@@ -179,8 +197,15 @@ async function keychainDenied(ui: ConnectUi): Promise<ConnectOutcome> {
   };
 }
 
-async function signInClaude(deps: Deps, ui: ConnectUi, before: string | null): Promise<ConnectOutcome> {
-  const executable = await findExecutable(deps, CLI_SIGN_IN.claude.name, await resolveUserPath(deps));
+// `path` is the user's PATH, and `configDir` is the folder Claude Code is signed in to, as connectClaude resolved them.
+async function signInClaude(
+  deps: Deps,
+  ui: ConnectUi,
+  path: string,
+  configDir: string | undefined,
+  before: string | null,
+): Promise<ConnectOutcome> {
+  const executable = await findExecutable(deps, CLI_SIGN_IN.claude.name, path);
   if (!executable) {
     // Connect saved the Keychain setting above, but there is nothing to read without Claude Code. It is turned back off
     // so the item doesn't show Disconnect for nothing.
@@ -193,10 +218,10 @@ async function signInClaude(deps: Deps, ui: ConnectUi, before: string | null): P
     };
   }
   return signInInTerminal(deps, ui, {
-    argv: cliCommand(deps, "CLAUDE_CONFIG_DIR", executable, CLI_SIGN_IN.claude.args),
+    argv: cliCommand("CLAUDE_CONFIG_DIR", configDir, executable, CLI_SIGN_IN.claude.args),
     progressTitle: "Finish signing in in Terminal",
     progressMessage: "Paste the code in Terminal if Claude Code asks for it",
-    check: async () => isNewLogin(before, await readClaudeMarker(deps)),
+    check: async () => isNewLogin(before, await readClaudeMarker(deps, configDir)),
     failure: "Claude Code sign-in didn't finish",
   });
 }
@@ -205,22 +230,22 @@ async function signInClaude(deps: Deps, ui: ConnectUi, before: string | null): P
 // date. That is read without the access dialog, and Claude Code writes the item whenever it writes a login. The
 // credentials file is the marker when there is no item, which is where claude.ts reads the login then. An item whose date
 // can't be read gives no marker, so nothing is compared.
-async function readClaudeMarker(deps: Deps): Promise<string | null> {
-  const item = await readKeychainItemDate(deps, claudeKeychainService(deps.env.CLAUDE_CONFIG_DIR, deps.homedir));
+async function readClaudeMarker(deps: Deps, configDir: string | undefined): Promise<string | null> {
+  const item = await readKeychainItemDate(deps, claudeKeychainService(configDir, deps.homedir));
   if (item.kind === "found") {
     return item.modified;
   }
   if (item.kind === "error") {
     return null;
   }
-  return readClaudeCredentials(deps);
+  return readClaudeCredentials(deps, configDir);
 }
 
 // The credentials file Claude Code keeps outside the Keychain, as text. An unreadable file counts as missing.
-async function readClaudeCredentials(deps: Deps): Promise<string | null> {
-  const configDir = deps.env.CLAUDE_CONFIG_DIR || `${deps.homedir}/.claude`;
+async function readClaudeCredentials(deps: Deps, configDir: string | undefined): Promise<string | null> {
+  const folder = configDir || `${deps.homedir}/.claude`;
   try {
-    return await deps.readFile(`${configDir}/.credentials.json`);
+    return await deps.readFile(`${folder}/.credentials.json`);
   } catch {
     return null;
   }
@@ -233,7 +258,20 @@ function isNewLogin(before: string | null, after: string | null): boolean {
 }
 
 async function connectCodex(deps: Deps, ui: ConnectUi): Promise<ConnectOutcome> {
-  const before = await readCodexLogin(deps);
+  // A Connect stopped before this saves nothing and reads nothing.
+  if (ui.signal?.aborted) {
+    return STOPPED;
+  }
+  // The login shell is asked first, for the PATH and for the folder Codex is signed in to. No login is read yet.
+  const env = await resolveUserEnv(deps);
+  // A Connect stopped while the shell ran must not save, since Disconnect may have run.
+  if (ui.signal?.aborted) {
+    return STOPPED;
+  }
+  // The folder is saved before the login is read, so the read below and later refreshes use the same folder.
+  await ui.save({ codexHome: env.codexHome ?? "" });
+  const codexHome = env.codexHome || deps.env.CODEX_HOME;
+  const before = await readCodexLogin(deps, codexHome);
   // A Connect stopped while the login was read doesn't verify it.
   if (ui.signal?.aborted) {
     return STOPPED;
@@ -242,7 +280,7 @@ async function connectCodex(deps: Deps, ui: ConnectUi): Promise<ConnectOutcome> 
     return CONNECTED;
   }
 
-  const executable = await findExecutable(deps, CLI_SIGN_IN.codex.name, await resolveUserPath(deps));
+  const executable = await findExecutable(deps, CLI_SIGN_IN.codex.name, env.path);
   if (!executable) {
     return {
       kind: "failed",
@@ -251,10 +289,10 @@ async function connectCodex(deps: Deps, ui: ConnectUi): Promise<ConnectOutcome> 
     };
   }
   return signInInTerminal(deps, ui, {
-    argv: cliCommand(deps, "CODEX_HOME", executable, CLI_SIGN_IN.codex.args),
+    argv: cliCommand("CODEX_HOME", codexHome, executable, CLI_SIGN_IN.codex.args),
     progressTitle: "Finish signing in in Terminal",
     progressMessage: "Codex is waiting for its sign-in to finish",
-    check: async () => isNewLogin(before, await readCodexLogin(deps)),
+    check: async () => isNewLogin(before, await readCodexLogin(deps, codexHome)),
     failure: "Codex sign-in didn't finish",
   });
 }
@@ -269,7 +307,7 @@ async function connectGemini(deps: Deps, ui: ConnectUi): Promise<ConnectOutcome>
     return CONNECTED;
   }
 
-  const executable = await findExecutable(deps, "gemini", await resolveUserPath(deps));
+  const executable = await findExecutable(deps, "gemini", (await resolveUserEnv(deps)).path);
   if (!executable) {
     return {
       kind: "failed",
@@ -358,12 +396,15 @@ async function signInInTerminal(
   return waitForLogin(deps, ui, options.check, options.failure);
 }
 
-// The command Terminal runs for a CLI. Terminal's shell may set another config folder than the one the extension reads
-// (the extension's own environment is Raycast's). So the extension's value is passed on the command line, and the
-// variable is removed when the extension has none. Otherwise a folder that only Terminal's shell sets, from the user's
-// shell files, would be used, and the login would be written where the extension never reads it.
-function cliCommand(deps: Deps, variable: string, executable: string, args: readonly string[]): string[] {
-  const value = deps.env[variable];
+// The command Terminal runs for a CLI. Terminal's shell may set another config folder than the one the extension reads,
+// from the user's shell files. So the folder the extension reads is passed on the command line, and the variable is
+// removed when there is none. Otherwise the login would be written to a folder the extension never reads.
+function cliCommand(
+  variable: string,
+  value: string | undefined,
+  executable: string,
+  args: readonly string[],
+): string[] {
   const envArgs = value ? [ENV, `${variable}=${value}`] : [ENV, "-u", variable];
   return [...envArgs, executable, ...args];
 }

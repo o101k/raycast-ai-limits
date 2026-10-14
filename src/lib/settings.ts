@@ -44,8 +44,10 @@ export function toSettings(prefs: Preferences, connections: Connections = {}, gi
   const moonshot = resolveSecret(prefs.moonshotApiKey, connections.moonshotApiKey);
 
   return {
-    // Only a connection can turn this on, since Raycast preferences have no such setting.
+    // Only a connection can turn these on, since Raycast preferences have no such settings.
     claudeKeychain: connections.claudeKeychain,
+    claudeConfigDir: connections.claudeConfigDir,
+    codexHome: connections.codexHome,
     claudeSessionKey: claudeSession.value,
     claudeSessionKeySource: claudeSession.source,
     cursorCookie: cursor.value,

@@ -40,6 +40,8 @@ const CONNECT_KINDS: ConnectMethod["kind"][] = [
 // Every field of Connections. Typed as a full record, so a new Connections field fails to compile until it is listed here.
 const CONNECTION_KEYS: Record<keyof Connections, true> = {
   claudeKeychain: true,
+  claudeConfigDir: true,
+  codexHome: true,
   claudeSessionKey: true,
   cursorCookie: true,
   openrouterApiKey: true,

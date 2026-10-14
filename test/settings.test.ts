@@ -93,6 +93,13 @@ describe("toSettings", () => {
   });
 
   describe("with stored connections", () => {
+    it("passes the config folders the user's shell set through from the connections only", () => {
+      const settings = toSettings(prefs(), { claudeConfigDir: "/work/claude", codexHome: "/work/codex" });
+      expect(settings.claudeConfigDir).toBe("/work/claude");
+      expect(settings.codexHome).toBe("/work/codex");
+      expect(toSettings(prefs()).codexHome).toBeUndefined();
+    });
+
     it("uses a stored connection when the preference is empty", () => {
       const connections: Connections = { openrouterApiKey: "sk-or-v1-stored", cursorCookie: "cookie-stored" };
       const settings = toSettings(prefs({ openrouterApiKey: "", cursorCookie: "  " }), connections);

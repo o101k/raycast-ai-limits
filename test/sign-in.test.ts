@@ -8,7 +8,7 @@ import {
   readCodexLogin,
   readCursorLogin,
   readGeminiLogin,
-  resolveUserPath,
+  resolveUserEnv,
   waitFor,
 } from "../src/lib/sign-in";
 import { TOKEN_QUERY } from "../src/lib/providers/cursor";
@@ -19,32 +19,76 @@ const APPENDED = `${HOME}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/
 const DONE = { exitCode: 0, stdout: "", stderr: "" };
 const OSASCRIPT = "/usr/bin/osascript";
 
-describe("resolveUserPath", () => {
+// What the login shell prints for the extension: the PATH, then CLAUDE_CONFIG_DIR and CODEX_HOME, each between markers.
+function shellOutput(path: string, claudeConfigDir = "", codexHome = ""): string {
+  return `__AI_LIMITS__${path}__AI_LIMITS__${claudeConfigDir}__AI_LIMITS__${codexHome}__AI_LIMITS__`;
+}
+
+describe("resolveUserEnv", () => {
   it("takes the PATH between the markers, so a banner printed before it is ignored", async () => {
     const deps = fakeDeps();
     deps.programs.push({
       file: "/bin/zsh",
-      respond: { exitCode: 0, stdout: "Welcome back!\n__AI_LIMITS__/opt/x/bin:/usr/bin__AI_LIMITS__\n", stderr: "" },
+      respond: { exitCode: 0, stdout: `Welcome back!\n${shellOutput("/opt/x/bin:/usr/bin")}\n`, stderr: "" },
     });
 
-    expect(await resolveUserPath(deps)).toBe(
+    expect((await resolveUserEnv(deps)).path).toBe(
       `/opt/x/bin:/usr/bin:${HOME}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/bin`,
     );
   });
 
-  it("asks the default shell for its PATH with an interactive login command and a 5 second timeout", async () => {
+  it("asks the default shell for its PATH and folders with an interactive login command and a 5 second timeout", async () => {
     const deps = fakeDeps();
     deps.programs.push({ file: "/bin/zsh", respond: DONE });
 
-    await resolveUserPath(deps);
+    await resolveUserEnv(deps);
 
     expect(deps.runCalls).toEqual([
       {
         file: "/bin/zsh",
-        args: ["-ilc", 'printf "__AI_LIMITS__%s__AI_LIMITS__" "$PATH"'],
+        args: [
+          "-ilc",
+          'printf "__AI_LIMITS__%s__AI_LIMITS__%s__AI_LIMITS__%s__AI_LIMITS__" "$PATH" "$CLAUDE_CONFIG_DIR" "$CODEX_HOME"',
+        ],
         options: { timeoutMs: 5_000 },
       },
     ]);
+  });
+
+  it("reads CLAUDE_CONFIG_DIR and CODEX_HOME from the shell, with surrounding spaces trimmed", async () => {
+    const deps = fakeDeps();
+    deps.programs.push({
+      file: "/bin/zsh",
+      respond: {
+        exitCode: 0,
+        stdout: shellOutput("/usr/bin", " /Volumes/work/claude ", "/Volumes/work/codex"),
+        stderr: "",
+      },
+    });
+
+    expect(await resolveUserEnv(deps)).toMatchObject({
+      claudeConfigDir: "/Volumes/work/claude",
+      codexHome: "/Volumes/work/codex",
+    });
+  });
+
+  it("reads the folders the same way from bash, zsh and fish, and leaves them unset when the shell has none", async () => {
+    for (const shell of ["/bin/bash", "/bin/zsh", "/usr/local/bin/fish"]) {
+      const set = fakeDeps();
+      set.env.SHELL = shell;
+      set.programs.push({
+        file: shell,
+        respond: { exitCode: 0, stdout: shellOutput("/usr/bin", "/work/claude", "/work/codex"), stderr: "" },
+      });
+      expect(await resolveUserEnv(set)).toMatchObject({ claudeConfigDir: "/work/claude", codexHome: "/work/codex" });
+
+      const unset = fakeDeps();
+      unset.env.SHELL = shell;
+      unset.programs.push({ file: shell, respond: { exitCode: 0, stdout: shellOutput("/usr/bin"), stderr: "" } });
+      const env = await resolveUserEnv(unset);
+      expect(env.claudeConfigDir).toBeUndefined();
+      expect(env.codexHome).toBeUndefined();
+    }
   });
 
   it("runs the shell from SHELL when it is an absolute path to bash, zsh, fish or sh", async () => {
@@ -53,7 +97,7 @@ describe("resolveUserPath", () => {
       deps.env.SHELL = shell;
       deps.programs.push({ file: shell, respond: DONE });
 
-      await resolveUserPath(deps);
+      await resolveUserEnv(deps);
 
       expect(deps.runCalls[0].file).toBe(shell);
     }
@@ -65,7 +109,7 @@ describe("resolveUserPath", () => {
       deps.env.SHELL = shell;
       deps.programs.push({ file: "/bin/zsh", respond: DONE });
 
-      await resolveUserPath(deps);
+      await resolveUserEnv(deps);
 
       expect(deps.runCalls[0].file).toBe("/bin/zsh");
     }
@@ -76,13 +120,16 @@ describe("resolveUserPath", () => {
     deps.env.SHELL = "/usr/local/bin/fish";
     deps.programs.push({
       file: "/usr/local/bin/fish",
-      respond: { exitCode: 0, stdout: "__AI_LIMITS__/opt/x/bin:/usr/bin__AI_LIMITS__", stderr: "" },
+      respond: { exitCode: 0, stdout: shellOutput("/opt/x/bin:/usr/bin"), stderr: "" },
     });
 
-    const path = await resolveUserPath(deps);
+    const env = await resolveUserEnv(deps);
 
-    expect(deps.runCalls[0].args).toEqual(["-ilc", 'printf "__AI_LIMITS__%s__AI_LIMITS__" (string join : $PATH)']);
-    expect(path).toBe(`/opt/x/bin:/usr/bin:${HOME}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/bin`);
+    expect(deps.runCalls[0].args).toEqual([
+      "-ilc",
+      'printf "__AI_LIMITS__%s__AI_LIMITS__%s__AI_LIMITS__%s__AI_LIMITS__" (string join : $PATH) "$CLAUDE_CONFIG_DIR" "$CODEX_HOME"',
+    ]);
+    expect(env.path).toBe(`/opt/x/bin:/usr/bin:${HOME}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/bin`);
   });
 
   it("falls back to the process PATH when the shell exits non-zero", async () => {
@@ -90,16 +137,31 @@ describe("resolveUserPath", () => {
     deps.env.PATH = "/custom/bin:/usr/bin";
     deps.programs.push({ file: "/bin/zsh", respond: { exitCode: 1, stdout: "", stderr: "boom" } });
 
-    expect(await resolveUserPath(deps)).toBe(
+    expect((await resolveUserEnv(deps)).path).toBe(
       `/custom/bin:/usr/bin:${HOME}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/bin`,
     );
+  });
+
+  it("sets no folder when the shell fails, so the extension's own environment decides", async () => {
+    const deps = fakeDeps();
+    deps.env.CLAUDE_CONFIG_DIR = "/process/claude";
+    deps.env.CODEX_HOME = "/process/codex";
+    deps.programs.push({
+      file: "/bin/zsh",
+      respond: { exitCode: 1, stdout: shellOutput("/usr/bin", "/work/claude", "/work/codex"), stderr: "boom" },
+    });
+
+    const env = await resolveUserEnv(deps);
+
+    expect(env.claudeConfigDir).toBeUndefined();
+    expect(env.codexHome).toBeUndefined();
   });
 
   it("falls back to the process PATH when the shell can't be started", async () => {
     const deps = fakeDeps();
     deps.env.PATH = "/custom/bin:/usr/bin";
 
-    expect(await resolveUserPath(deps)).toBe(
+    expect((await resolveUserEnv(deps)).path).toBe(
       `/custom/bin:/usr/bin:${HOME}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/bin`,
     );
   });
@@ -109,24 +171,26 @@ describe("resolveUserPath", () => {
     deps.env.PATH = "/custom/bin";
     deps.programs.push({ file: "/bin/zsh", respond: { exitCode: 0, stdout: "/opt/x/bin", stderr: "" } });
 
-    expect(await resolveUserPath(deps)).toBe(`/custom/bin:${APPENDED}`);
+    expect((await resolveUserEnv(deps)).path).toBe(`/custom/bin:${APPENDED}`);
   });
 
   it("appends the well-known directories, including ~/.local/bin, when the PATH lacks them", async () => {
     const deps = fakeDeps();
     deps.env.PATH = "/custom/bin";
 
-    expect(await resolveUserPath(deps)).toBe(`/custom/bin:${APPENDED}`);
+    expect((await resolveUserEnv(deps)).path).toBe(`/custom/bin:${APPENDED}`);
   });
 
   it("keeps each directory once, at its first position, and drops empty entries", async () => {
     const deps = fakeDeps();
     deps.programs.push({
       file: "/bin/zsh",
-      respond: { exitCode: 0, stdout: "__AI_LIMITS__/usr/bin:/opt/homebrew/bin:/usr/bin::/a__AI_LIMITS__", stderr: "" },
+      respond: { exitCode: 0, stdout: shellOutput("/usr/bin:/opt/homebrew/bin:/usr/bin::/a"), stderr: "" },
     });
 
-    expect(await resolveUserPath(deps)).toBe(`/usr/bin:/opt/homebrew/bin:/a:${HOME}/.local/bin:/usr/local/bin:/bin`);
+    expect((await resolveUserEnv(deps)).path).toBe(
+      `/usr/bin:/opt/homebrew/bin:/a:${HOME}/.local/bin:/usr/local/bin:/bin`,
+    );
   });
 });
 
@@ -427,24 +491,30 @@ describe("waitFor", () => {
 });
 
 describe("readCodexLogin", () => {
-  it("returns the text of auth.json under ~/.codex", async () => {
+  it("returns the text of auth.json under ~/.codex when no folder is given", async () => {
     const deps = fakeDeps({ files: { [`${HOME}/.codex/auth.json`]: '{"tokens":{}}' } });
 
-    expect(await readCodexLogin(deps)).toBe('{"tokens":{}}');
+    expect(await readCodexLogin(deps, undefined)).toBe('{"tokens":{}}');
   });
 
   it("is null when there is no login file", async () => {
-    expect(await readCodexLogin(fakeDeps())).toBeNull();
+    expect(await readCodexLogin(fakeDeps(), undefined)).toBeNull();
   });
 
-  it("looks in CODEX_HOME instead of ~/.codex when it is set", async () => {
+  it("reads auth.json from the folder it is given, instead of ~/.codex", async () => {
+    const deps = fakeDeps({ files: { [`${HOME}/.codex/auth.json`]: "{}" } });
+
+    expect(await readCodexLogin(deps, "/Volumes/work/codex")).toBeNull();
+
+    deps.files.set("/Volumes/work/codex/auth.json", '{"work":true}');
+    expect(await readCodexLogin(deps, "/Volumes/work/codex")).toBe('{"work":true}');
+  });
+
+  it("ignores CODEX_HOME in the environment, since Connect passes in the folder it resolved", async () => {
     const deps = fakeDeps({ files: { [`${HOME}/.codex/auth.json`]: "{}" } });
     deps.env.CODEX_HOME = "/Volumes/work/codex";
 
-    expect(await readCodexLogin(deps)).toBeNull();
-
-    deps.files.set("/Volumes/work/codex/auth.json", '{"work":true}');
-    expect(await readCodexLogin(deps)).toBe('{"work":true}');
+    expect(await readCodexLogin(deps, undefined)).toBe("{}");
   });
 
   it("is null when the file can't be read", async () => {
@@ -453,7 +523,7 @@ describe("readCodexLogin", () => {
       throw new Error("EACCES: permission denied");
     };
 
-    expect(await readCodexLogin(deps)).toBeNull();
+    expect(await readCodexLogin(deps, undefined)).toBeNull();
   });
 });
 

@@ -535,6 +535,7 @@ describe("fetchGeminiUsage errors", () => {
     expect(error).toMatchObject({
       kind: "auth",
       message: "Google no longer serves Gemini CLI quota for personal accounts",
+      code: "account-unsupported",
     });
     expect((error as ProviderError).hint).toContain("June 2026");
     expect((error as ProviderError).hint).toContain("Code Assist Standard");
@@ -548,6 +549,7 @@ describe("fetchGeminiUsage errors", () => {
     const error = await fetchGeminiUsage(deps).catch((e: unknown) => e);
     expect(error).toMatchObject({ kind: "auth" });
     expect((error as ProviderError).message).not.toContain("personal accounts");
+    expect((error as ProviderError).code).toBeUndefined();
   });
 
   it("keeps the generic auth error for a 403 when the account has a current tier", async () => {

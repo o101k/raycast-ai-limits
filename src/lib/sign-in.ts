@@ -7,12 +7,15 @@ import { STATE_DB, TOKEN_QUERY } from "./providers/cursor";
 const OSASCRIPT = "/usr/bin/osascript";
 const OSASCRIPT_TIMEOUT_MS = 60_000;
 
-// A marker around the PATH, so text an interactive shell prints before it (a banner, a greeting) is ignored.
-const PATH_MARKER = "__AI_LIMITS__";
-const PATH_PATTERN = new RegExp(`${PATH_MARKER}(.*?)${PATH_MARKER}`, "s");
-const PATH_COMMAND = `printf "${PATH_MARKER}%s${PATH_MARKER}" "$PATH"`;
-// Fish stores PATH as a list, and "$PATH" would join its entries with spaces, so they are joined with colons here.
-const FISH_PATH_COMMAND = `printf "${PATH_MARKER}%s${PATH_MARKER}" (string join : $PATH)`;
+// A marker around each value the login shell prints, so text an interactive shell prints before them (a banner, a
+// greeting) is ignored. The values are the PATH, then CLAUDE_CONFIG_DIR and CODEX_HOME.
+const MARKER = "__AI_LIMITS__";
+const ENV_PATTERN = new RegExp(`${MARKER}(.*?)${MARKER}(.*?)${MARKER}(.*?)${MARKER}`, "s");
+const PRINT_FORMAT = `${MARKER}%s${MARKER}%s${MARKER}%s${MARKER}`;
+const ENV_COMMAND = `printf "${PRINT_FORMAT}" "$PATH" "$CLAUDE_CONFIG_DIR" "$CODEX_HOME"`;
+// Fish stores PATH as a list, and "$PATH" would join its entries with spaces, so they are joined with colons here. An
+// unset variable expands to nothing inside double quotes in fish too.
+const FISH_ENV_COMMAND = `printf "${PRINT_FORMAT}" (string join : $PATH) "$CLAUDE_CONFIG_DIR" "$CODEX_HOME"`;
 // Shells that accept the -ilc form used below. Anything else, or a relative SHELL, falls back to zsh, the macOS default.
 const KNOWN_SHELL = /^\/(?:.*\/)?(bash|zsh|fish|sh)$/;
 const DEFAULT_SHELL = "/bin/zsh";
@@ -32,29 +35,57 @@ export const CLI_SIGN_IN = {
 
 export const CURSOR_BUNDLE_ID = "com.todesktop.230313mzl4w4u92";
 
-// The PATH a Terminal window on this Mac would have. Raycast starts extensions with a minimal PATH, which leaves out
-// Homebrew and npm installs, so the login shell is asked for its PATH. When that fails, the process PATH is used.
-export async function resolveUserPath(deps: Deps): Promise<string> {
-  const loginPath = await loginShellPath(deps);
-  const parts = [...(loginPath ?? deps.env.PATH ?? "").split(":"), `${deps.homedir}/.local/bin`, ...WELL_KNOWN_DIRS];
-  // An empty entry would mean the current directory, so it is dropped. The Set keeps the first copy of each entry, so a
-  // directory the login shell already lists keeps its place and the well-known ones are only added when missing.
-  return [...new Set(parts.filter((part) => part !== ""))].join(":");
+// What the user's shell sets for the CLIs. Each folder is undefined when the shell doesn't set it.
+export interface UserEnv {
+  // The PATH a Terminal window on this Mac would have.
+  path: string;
+  claudeConfigDir?: string;
+  codexHome?: string;
 }
 
-// Returns the login shell's PATH, or undefined when the shell fails or prints no marker, so the caller can fall back.
-async function loginShellPath(deps: Deps): Promise<string | undefined> {
+// The PATH a Terminal window on this Mac would have, and the config folders the user's shell sets. Raycast starts
+// extensions with a minimal PATH, which leaves out Homebrew and npm installs, and its environment rarely has
+// CLAUDE_CONFIG_DIR or CODEX_HOME. So the login shell is asked for all three. When that fails, the process PATH is
+// used, and no folder is set, so the extension's own environment decides.
+export async function resolveUserEnv(deps: Deps): Promise<UserEnv> {
+  const shell = await loginShellValues(deps);
+  const parts = [...(shell?.path ?? deps.env.PATH ?? "").split(":"), `${deps.homedir}/.local/bin`, ...WELL_KNOWN_DIRS];
+  // An empty entry would mean the current directory, so it is dropped. The Set keeps the first copy of each entry, so a
+  // directory the login shell already lists keeps its place and the well-known ones are only added when missing.
+  return {
+    path: [...new Set(parts.filter((part) => part !== ""))].join(":"),
+    claudeConfigDir: nonEmpty(shell?.claudeConfigDir),
+    codexHome: nonEmpty(shell?.codexHome),
+  };
+}
+
+interface LoginShellValues {
+  path: string;
+  claudeConfigDir: string;
+  codexHome: string;
+}
+
+// Returns what the login shell prints between the markers, or undefined when the shell fails or prints no markers, so
+// the caller can fall back.
+async function loginShellValues(deps: Deps): Promise<LoginShellValues | undefined> {
   const shell = loginShell(deps.env.SHELL);
-  const command = shell.endsWith("/fish") ? FISH_PATH_COMMAND : PATH_COMMAND;
+  const command = shell.endsWith("/fish") ? FISH_ENV_COMMAND : ENV_COMMAND;
   try {
     const result = await deps.run(shell, ["-ilc", command], { timeoutMs: 5_000 });
     if (result.exitCode !== 0) {
       return undefined;
     }
-    return PATH_PATTERN.exec(result.stdout)?.[1];
+    const match = ENV_PATTERN.exec(result.stdout);
+    return match ? { path: match[1], claudeConfigDir: match[2], codexHome: match[3] } : undefined;
   } catch {
     return undefined;
   }
+}
+
+// A value the shell printed, trimmed. An empty one means the shell doesn't set it.
+function nonEmpty(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
 }
 
 function loginShell(shell: string | undefined): string {
@@ -82,8 +113,8 @@ export async function findExecutable(deps: Deps, name: string, path: string): Pr
 // Opens a new Terminal window and runs argv (the executable first) in it. The sign-in runs in Terminal rather than as
 // a child of Raycast, because Raycast stops a hidden command after a while, and that would end a sign-in still waiting
 // for the browser. Terminal's shell also has the PATH from the user's shell files, and the CLI keeps running after this
-// returns. Config folders such as CLAUDE_CONFIG_DIR are not left to that shell, since it may set them differently from
-// the extension, so connect.ts passes them to the CLI itself.
+// returns. Config folders such as CLAUDE_CONFIG_DIR are passed to the CLI by connect.ts, so the login is written where
+// the extension reads it, whatever Terminal's shell sets.
 export async function openInTerminal(deps: Deps, argv: string[]): Promise<void> {
   const command = argv.map(shellQuote).join(" ");
   // Backslashes are escaped first, so the ones added for the quotes aren't escaped again.
@@ -176,11 +207,11 @@ function defaultSleep(ms: number, signal: AbortSignal | undefined): Promise<void
   });
 }
 
-// Codex's login file as text. It lives in CODEX_HOME when that is set, the same as codex.ts reads it. Connect compares
-// the text before and after a sign-in, so a login that was replaced can be told apart from the old one.
-export async function readCodexLogin(deps: Deps): Promise<string | null> {
-  const home = deps.env.CODEX_HOME || `${deps.homedir}/.codex`;
-  return readText(deps, `${home}/auth.json`);
+// Codex's login file as text. It lives in the CODEX_HOME folder when there is one, the same folder codex.ts reads, and
+// in ~/.codex otherwise. The caller passes the folder in. Connect compares the text before and after a sign-in, so a
+// login that was replaced can be told apart from the old one.
+export async function readCodexLogin(deps: Deps, codexHome: string | undefined): Promise<string | null> {
+  return readText(deps, `${codexHome || `${deps.homedir}/.codex`}/auth.json`);
 }
 
 export async function readGeminiLogin(deps: Deps): Promise<string | null> {
