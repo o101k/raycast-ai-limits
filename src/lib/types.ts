@@ -49,6 +49,8 @@ export interface ProviderUsage {
 // User settings the providers read. Built from the Raycast preferences by the command, so providers and tests don't
 // depend on the generated Preferences type.
 export interface Settings {
+  // The user chose Connect on Claude, which allows reading Claude Code's login from the macOS Keychain.
+  claudeKeychain?: boolean;
   claudeSessionKey?: string;
   cursorCookie?: string;
   githubToken?: string;

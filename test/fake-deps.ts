@@ -1,5 +1,5 @@
 import { vi } from "vitest";
-import { Deps } from "../src/lib/deps";
+import { Deps, RunOptions, RunResult } from "../src/lib/deps";
 
 // A stand-in for everything outside the providers: files, sqlite, the network and the clock. Tests describe the Mac's
 // files and the providers' HTTP answers, then read `requests` to check what was sent. Nothing real is touched.
@@ -36,6 +36,17 @@ export interface FakeDeps extends Deps {
   // Answers sqlite(dbPath, sql) calls, keyed by dbPath. A missing key throws like an unopenable database.
   sqliteResults: Map<string, string>;
   sqliteCalls: { dbPath: string; sql: string }[];
+  // Answers run(file, args) calls. The first handler whose `file` matches answers; a call with no handler rejects like
+  // a program that doesn't exist.
+  programs: FakeProgram[];
+  runCalls: { file: string; args: string[]; options?: RunOptions }[];
+  // Paths isExecutable() reports as executable.
+  executables: Set<string>;
+}
+
+export interface FakeProgram {
+  file: string;
+  respond: RunResult | ((args: string[], options?: RunOptions) => RunResult | Promise<RunResult>);
 }
 
 export function fakeDeps(options: { files?: Record<string, string>; routes?: Route[] } = {}): FakeDeps {
@@ -44,6 +55,9 @@ export function fakeDeps(options: { files?: Record<string, string>; routes?: Rou
   const requests: RecordedRequest[] = [];
   const sqliteResults = new Map<string, string>();
   const sqliteCalls: { dbPath: string; sql: string }[] = [];
+  const programs: FakeProgram[] = [];
+  const runCalls: { file: string; args: string[]; options?: RunOptions }[] = [];
+  const executables = new Set<string>();
 
   const fetchFake = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input);
@@ -69,6 +83,9 @@ export function fakeDeps(options: { files?: Record<string, string>; routes?: Rou
     requests,
     sqliteResults,
     sqliteCalls,
+    programs,
+    runCalls,
+    executables,
     fetch: fetchFake as unknown as typeof fetch,
     readFile: async (path) => files.get(path) ?? null,
     // A directory exists when a fake file lives under it. Lists its direct children.
@@ -90,6 +107,16 @@ export function fakeDeps(options: { files?: Record<string, string>; routes?: Rou
       }
       return result;
     },
+    run: async (file, args, options) => {
+      runCalls.push({ file, args, options });
+      const program = programs.find((candidate) => candidate.file === file);
+      if (!program) {
+        throw Object.assign(new Error(`spawn ${file} ENOENT`), { code: "ENOENT" });
+      }
+      return typeof program.respond === "function" ? program.respond(args, options) : program.respond;
+    },
+    isExecutable: async (path) => executables.has(path),
+    platform: "darwin",
     homedir: HOME,
     env: {},
     now: () => NOW,

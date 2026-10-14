@@ -1,6 +1,6 @@
 /// <reference types="node" />
 import { execFile } from "node:child_process";
-import { readdir, readFile } from "node:fs/promises";
+import { access, constants, readdir, readFile } from "node:fs/promises";
 import os from "node:os";
 import { promisify } from "node:util";
 
@@ -19,9 +19,28 @@ export interface Deps {
   listDir(path: string): Promise<string[] | null>;
   // Runs a read-only query with /usr/bin/sqlite3 and returns its stdout. Throws when the database can't be opened.
   sqlite(dbPath: string, sql: string): Promise<string>;
+  // Runs a program (absolute path, no shell) and resolves with its exit code and output. A non-zero exit resolves too;
+  // only a program that can't be started, or one that runs past `timeoutMs`, rejects.
+  run(file: string, args: string[], options?: RunOptions): Promise<RunResult>;
+  // Whether the path is a file this process may execute.
+  isExecutable(path: string): Promise<boolean>;
+  platform: NodeJS.Platform;
   homedir: string;
   env: Record<string, string | undefined>;
   now(): number;
+}
+
+export interface RunOptions {
+  // Defaults to 10 seconds. Sign-in commands that wait for the browser pass a longer one.
+  timeoutMs?: number;
+  // Replaces the environment of the child. Defaults to this process's environment.
+  env?: Record<string, string | undefined>;
+}
+
+export interface RunResult {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
 }
 
 export function realDeps(): Deps {
@@ -52,6 +71,30 @@ export function realDeps(): Deps {
       const { stdout } = await execFileAsync(SQLITE3, ["-readonly", dbPath, sql], { timeout: 10_000 });
       return stdout;
     },
+    run: (file, args, options) =>
+      new Promise((resolve, reject) => {
+        execFile(
+          file,
+          args,
+          { timeout: options?.timeoutMs ?? 10_000, env: options?.env ?? process.env, maxBuffer: 1024 * 1024 },
+          (error, stdout, stderr) => {
+            if (error && (typeof error.code !== "number" || error.killed)) {
+              reject(error);
+              return;
+            }
+            resolve({ exitCode: typeof error?.code === "number" ? error.code : 0, stdout, stderr });
+          },
+        );
+      }),
+    isExecutable: async (path) => {
+      try {
+        await access(path, constants.X_OK);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    platform: process.platform,
     homedir: os.homedir(),
     env: process.env,
     now: () => Date.now(),
