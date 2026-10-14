@@ -1,6 +1,7 @@
 import { Connections } from "./connections";
 import { Deps } from "./deps";
-import { claudeKeychainService, readKeychainPassword } from "./keychain";
+import { claudeKeychainService, readKeychainItemDate, readKeychainPassword } from "./keychain";
+import { ProviderError, Settings } from "./types";
 import {
   CLI_SIGN_IN,
   CURSOR_BUNDLE_ID,
@@ -39,14 +40,44 @@ export type ConnectMethod =
 
 export type LocalConnectMethod = Extract<ConnectMethod, { kind: "claude" | "codex" | "gemini" | "cursor" }>;
 
+// What verify found. "ok" means the provider answered. "broken" means the provider rejected the login or can't find one.
+// "denied" means macOS refused the Keychain read, which says nothing about whether the login is good.
+export type LoginCheck = "ok" | "broken" | "denied";
+
+// Turns the error from a provider's fetch into a check. A failure that is neither a rejected login nor a missing one (no
+// network, for example) says nothing about the login, so it counts as "ok" too.
+export function loginCheckFromError(error: unknown): LoginCheck {
+  if (error instanceof ProviderError && error.code === "keychain-denied") {
+    return "denied";
+  }
+  if (error instanceof ProviderError && (error.kind === "auth" || error.kind === "not-connected")) {
+    return "broken";
+  }
+  return "ok";
+}
+
+// Whether Connect would have no effect. A credential typed into the preferences overrides what Connect saves, so Connect
+// is hidden for that provider. `preferences` is the settings built from the preferences alone.
+export function isConnectOverridden(method: ConnectMethod, preferences: Settings): boolean {
+  switch (method.kind) {
+    case "github":
+      return preferences.githubToken !== undefined;
+    case "openrouter":
+      return preferences.openrouterApiKey !== undefined;
+    case "api-key":
+      return preferences[method.field] !== undefined;
+    default:
+      return false;
+  }
+}
+
 export interface ConnectUi {
   // Shows what Connect is doing now, such as "Finish signing in in Terminal".
   progress(title: string, message?: string): void;
   // Stores credentials the extension keeps itself (LocalStorage in the real UI).
   save(patch: Partial<Connections>): Promise<void>;
-  // Fetches this provider's usage with the latest saved connections. True when it works, false when the login is
-  // missing or rejected.
-  verify(): Promise<boolean>;
+  // Fetches this provider's usage with the latest saved connections, and says whether the login works.
+  verify(): Promise<LoginCheck>;
   // Aborted when the user leaves the command, which stops any waiting.
   signal?: AbortSignal;
   // Replaces the wait between checks in tests. The real UI leaves it out.
@@ -64,12 +95,16 @@ const GEMINI_INSTALL_URL = "https://github.com/google-gemini/gemini-cli";
 const CURSOR_DOWNLOAD_URL = "https://cursor.com/download";
 
 const CONNECTED: ConnectOutcome = { kind: "connected" };
-// Closing the command stops the wait, but the sign-in itself keeps going in Terminal or the app.
+// Stopping Connect (closing the command, or Disconnect) ends the wait, but a sign-in already started keeps going in
+// Terminal or the app. The UI shows nothing for a stopped Connect, so this text is never displayed.
 const STOPPED: ConnectOutcome = {
   kind: "failed",
   title: "Connect stopped",
   message: "Finish signing in, then refresh",
 };
+
+// The env command sets CLAUDE_CONFIG_DIR or CODEX_HOME for one CLI. It is referenced by absolute path, like the tools.
+const ENV = "/usr/bin/env";
 
 // Each sign-in starts with the login that is already there. When it works (ui.verify), nothing is run. Otherwise the
 // sign-in runs and the login is polled until a new one appears.
@@ -91,22 +126,33 @@ async function connectClaude(deps: Deps, ui: ConnectUi): Promise<ConnectOutcome>
   await ui.save({ claudeKeychain: true });
   ui.progress("Connecting Claude Code", "If macOS asks for access to Claude Code's login, choose Always Allow");
 
+  // The password is read only here. Each read of it can show macOS's access dialog, so the wait for the sign-in uses the
+  // item's date instead.
   const read = await readKeychainPassword(deps, claudeKeychainService(deps.env.CLAUDE_CONFIG_DIR, deps.homedir));
   if (read.kind === "denied") {
-    // Turning the setting back off stops later refreshes from asking macOS again. Choosing Connect turns it on again.
-    await ui.save({ claudeKeychain: false });
-    return {
-      kind: "failed",
-      title: "macOS denied access to Claude Code's login",
-      message: "Choose Connect again and click Always Allow",
-    };
+    return keychainDenied(ui);
   }
-  // The Keychain item is the login when there is one. Otherwise the credentials file is, as claude.ts reads it.
-  const before = read.kind === "found" ? read.text : await readClaudeCredentials(deps);
-  if (before !== null && (await ui.verify())) {
+  const before = await readClaudeMarker(deps);
+  // With no login there is nothing to verify, so the sign-in starts at once.
+  const check = before === null ? undefined : await ui.verify();
+  if (check === "ok") {
     return CONNECTED;
   }
+  // macOS refusing the read says nothing about the login, so Terminal is not opened for it.
+  if (check === "denied") {
+    return keychainDenied(ui);
+  }
   return signInClaude(deps, ui, before);
+}
+
+// Turning the setting back off stops later refreshes from asking macOS again. Choosing Connect turns it on again.
+async function keychainDenied(ui: ConnectUi): Promise<ConnectOutcome> {
+  await ui.save({ claudeKeychain: false });
+  return {
+    kind: "failed",
+    title: "macOS denied access to Claude Code's login",
+    message: "Choose Connect again and click Always Allow",
+  };
 }
 
 async function signInClaude(deps: Deps, ui: ConnectUi, before: string | null): Promise<ConnectOutcome> {
@@ -123,22 +169,27 @@ async function signInClaude(deps: Deps, ui: ConnectUi, before: string | null): P
     };
   }
   return signInInTerminal(deps, ui, {
-    argv: [executable, ...CLI_SIGN_IN.claude.args],
+    argv: cliCommand(deps, "CLAUDE_CONFIG_DIR", executable, CLI_SIGN_IN.claude.args),
     progressTitle: "Finish signing in in Terminal",
     progressMessage: "Paste the code in Terminal if Claude Code asks for it",
-    check: async () => isNewLogin(before, await readClaudeLogin(deps)),
+    check: async () => isNewLogin(before, await readClaudeMarker(deps)),
     failure: "Claude Code sign-in didn't finish",
   });
 }
 
-// Claude Code's login as text, read the way claude.ts reads it: the Keychain item first, then the credentials file when
-// the item is missing. A denied Keychain read is no login, since the file may be the stale copy.
-async function readClaudeLogin(deps: Deps): Promise<string | null> {
-  const read = await readKeychainPassword(deps, claudeKeychainService(deps.env.CLAUDE_CONFIG_DIR, deps.homedir));
-  if (read.kind === "found") {
-    return read.text;
+// Claude Code's login marker, which is compared before and after a sign-in. On macOS it is the Keychain item's modified
+// date. That is read without the access dialog, and Claude Code writes the item whenever it writes a login. The
+// credentials file is the marker when there is no item, which is where claude.ts reads the login then. An item whose date
+// can't be read gives no marker, so nothing is compared.
+async function readClaudeMarker(deps: Deps): Promise<string | null> {
+  const item = await readKeychainItemDate(deps, claudeKeychainService(deps.env.CLAUDE_CONFIG_DIR, deps.homedir));
+  if (item.kind === "found") {
+    return item.modified;
   }
-  return read.kind === "denied" ? null : readClaudeCredentials(deps);
+  if (item.kind === "error") {
+    return null;
+  }
+  return readClaudeCredentials(deps);
 }
 
 // The credentials file Claude Code keeps outside the Keychain, as text. An unreadable file counts as missing.
@@ -159,7 +210,7 @@ function isNewLogin(before: string | null, after: string | null): boolean {
 
 async function connectCodex(deps: Deps, ui: ConnectUi): Promise<ConnectOutcome> {
   const before = await readCodexLogin(deps);
-  if (before !== null && (await ui.verify())) {
+  if (before !== null && (await ui.verify()) === "ok") {
     return CONNECTED;
   }
 
@@ -172,7 +223,7 @@ async function connectCodex(deps: Deps, ui: ConnectUi): Promise<ConnectOutcome> 
     };
   }
   return signInInTerminal(deps, ui, {
-    argv: [executable, ...CLI_SIGN_IN.codex.args],
+    argv: cliCommand(deps, "CODEX_HOME", executable, CLI_SIGN_IN.codex.args),
     progressTitle: "Finish signing in in Terminal",
     progressMessage: "Codex is waiting for its sign-in to finish",
     check: async () => isNewLogin(before, await readCodexLogin(deps)),
@@ -182,7 +233,7 @@ async function connectCodex(deps: Deps, ui: ConnectUi): Promise<ConnectOutcome> 
 
 async function connectGemini(deps: Deps, ui: ConnectUi): Promise<ConnectOutcome> {
   const before = await readGeminiLogin(deps);
-  if (before !== null && (await ui.verify())) {
+  if (before !== null && (await ui.verify()) === "ok") {
     return CONNECTED;
   }
 
@@ -209,10 +260,14 @@ async function connectCursor(deps: Deps, ui: ConnectUi): Promise<ConnectOutcome>
   // first, and the check below then looks at the app.
   await ui.save({ cursorCookie: "" });
   const before = await readCursorLogin(deps);
-  if (before !== null && (await ui.verify())) {
+  if (before !== null && (await ui.verify()) === "ok") {
     return CONNECTED;
   }
 
+  // A Connect stopped during the check above must not open the app.
+  if (ui.signal?.aborted) {
+    return STOPPED;
+  }
   if (!(await openApp(deps, CURSOR_BUNDLE_ID))) {
     return {
       kind: "failed",
@@ -242,6 +297,10 @@ async function signInInTerminal(
     failure: string;
   },
 ): Promise<ConnectOutcome> {
+  // A Connect stopped during the check before this must not open Terminal.
+  if (ui.signal?.aborted) {
+    return STOPPED;
+  }
   try {
     await openInTerminal(deps, options.argv);
   } catch (error) {
@@ -253,6 +312,14 @@ async function signInInTerminal(
   }
   ui.progress(options.progressTitle, options.progressMessage);
   return waitForLogin(deps, ui, options.check, options.failure);
+}
+
+// The command Terminal runs for a CLI. Terminal's shell may have another config folder than the one the extension reads
+// (the extension's own environment is Raycast's), so when the extension sets `variable`, it is passed on the command line.
+// The CLI then writes its login where the extension looks for it.
+function cliCommand(deps: Deps, variable: string, executable: string, args: readonly string[]): string[] {
+  const value = deps.env[variable];
+  return value ? [ENV, `${variable}=${value}`, executable, ...args] : [executable, ...args];
 }
 
 // Polls until the login is new. The clock comes from deps, so a test can move it forward. When the wait ends because

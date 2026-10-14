@@ -249,6 +249,7 @@ describe("fetchClaudeUsage with the Claude Code credentials file", () => {
     );
     expect(usage.source).toBe("claude.ai session");
     expect(usage.notes).toEqual(["Claude Code token expired, used claude.ai session"]);
+    expect(usage.keychainDenied).toBeUndefined();
   });
 
   it("throws an auth error with a hint when the token is expired and there is no session key", async () => {
@@ -320,7 +321,7 @@ describe("fetchClaudeUsage with the Claude Code credentials file", () => {
     expect(error).toMatchObject({
       kind: "auth",
       message: "claude.ai session failed: Claude rejected the credentials (HTTP 401)",
-      hint: expect.stringContaining("session key expired"),
+      hint: expect.stringContaining("Use Claude Session Key"),
     });
   });
 
@@ -459,7 +460,7 @@ describe("fetchClaudeUsage with the claude.ai session key", () => {
 
     const error = await fetchClaudeUsage(deps, WITH_SESSION).catch((caught: unknown) => caught);
 
-    expect(error).toMatchObject({ kind: "auth", hint: expect.stringContaining("session key expired") });
+    expect(error).toMatchObject({ kind: "auth", hint: expect.stringContaining("Use Claude Session Key") });
     expect(JSON.stringify(error)).not.toContain(SESSION_KEY);
   });
 
@@ -627,6 +628,23 @@ describe("fetchClaudeUsage with the Claude Code Keychain login", () => {
     );
     expect(usage.source).toBe("claude.ai session");
     expect(usage.notes).toEqual([KEYCHAIN_DENIED_NOTE]);
+    // The denial is reported, so the UI turns the Keychain setting off instead of asking macOS on every refresh.
+    expect(usage.keychainDenied).toBe(true);
+  });
+
+  it("carries the keychain-denied code when the session also fails after a denied Keychain read", async () => {
+    const deps = fakeDeps({ routes: sessionRoutes({ organizationsStatus: 401, organizations: {} }) });
+    deps.programs.push(keychainAnswer(128));
+
+    const error = await fetchClaudeUsage(deps, { ...WITH_SESSION, claudeKeychain: true }).catch(
+      (caught: unknown) => caught,
+    );
+
+    expect(error).toMatchObject({
+      kind: "auth",
+      message: "claude.ai session failed: Claude rejected the credentials (HTTP 401)",
+      code: "keychain-denied",
+    });
   });
 
   it("treats a security run that can't start or times out as denied", async () => {
@@ -654,6 +672,7 @@ describe("fetchClaudeUsage with the Claude Code Keychain login", () => {
     );
     expect(usage.source).toBe("claude.ai session");
     expect(usage.notes).toEqual(["Claude Code token expired, used claude.ai session"]);
+    expect(usage.keychainDenied).toBeUndefined();
   });
 
   it("is not-connected with the Connect hint when the setting is on and no login exists", async () => {

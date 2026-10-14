@@ -242,6 +242,21 @@ describe("fetchCopilotUsage", () => {
     expect((error as ProviderError).hint).toContain("github.com/settings/copilot");
   });
 
+  it("names the preference, not Connect GitHub, in the 404 hint when a preference token is set", async () => {
+    const deps = fakeDeps({ routes: copilotRoutes({ message: "Not Found" }, 404) });
+    const error = await fetchCopilotUsage(deps, { githubToken: "ghp_ok" }).catch((e: unknown) => e);
+
+    expect((error as ProviderError).hint).not.toContain("Connect GitHub");
+    expect((error as ProviderError).hint).toContain("GitHub Token for Copilot preference");
+  });
+
+  it("names Connect GitHub in the 404 hint when the token came from signing in", async () => {
+    const deps = fakeDeps({ routes: copilotRoutes({ message: "Not Found" }, 404) });
+    const error = await fetchCopilotUsage(deps, { githubOAuthToken: "gho_ok" }).catch((e: unknown) => e);
+
+    expect((error as ProviderError).hint).toContain("Choose Connect GitHub from this item's actions");
+  });
+
   it("passes other HTTP failures through as http errors", async () => {
     const deps = fakeDeps({ routes: copilotRoutes({}, 500) });
     await expect(fetchCopilotUsage(deps, { githubToken: "ghp_ok" })).rejects.toMatchObject({ kind: "http" });

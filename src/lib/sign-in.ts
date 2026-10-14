@@ -81,8 +81,9 @@ export async function findExecutable(deps: Deps, name: string, path: string): Pr
 
 // Opens a new Terminal window and runs argv (the executable first) in it. The sign-in runs in Terminal rather than as
 // a child of Raycast, because Raycast stops a hidden command after a while, and that would end a sign-in still waiting
-// for the browser. Terminal's shell also has the user's environment (CLAUDE_CONFIG_DIR, CODEX_HOME, the PATH from
-// their shell files), and the CLI keeps running after this returns.
+// for the browser. Terminal's shell also has the PATH from the user's shell files, and the CLI keeps running after this
+// returns. Config folders such as CLAUDE_CONFIG_DIR are not left to that shell, since it may set them differently from
+// the extension, so connect.ts passes them to the CLI itself.
 export async function openInTerminal(deps: Deps, argv: string[]): Promise<void> {
   const command = argv.map(shellQuote).join(" ");
   // Backslashes are escaped first, so the ones added for the quotes aren't escaped again.

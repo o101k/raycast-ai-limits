@@ -29,7 +29,7 @@ Providers without credentials appear under **Not Connected**, each with its Conn
 
 - **Show Limits As**: percent used (default) or percent left.
 - **Providers**: show or hide providers that aren't connected.
-- The provider keys and cookies listed above. Each is optional. A value typed here is used instead of the one Connect saved.
+- The provider keys and cookies listed above. Each is optional. A value typed here is used instead of the one Connect saved. While a provider's API key or GitHub token is set here, its Connect action is hidden.
 
 ## Fallback: copy a session cookie
 
@@ -47,7 +47,7 @@ Cookies expire when the site signs you out. When a provider says the credentials
 
 - Your credentials stay on this Mac. They are only sent to the provider they belong to, over HTTPS.
 - Keys and cookies saved by Connect are stored in Raycast's encrypted local storage. **Disconnect** removes them. Values in the preferences are kept by Raycast, and Disconnect doesn't touch them.
-- Claude Code stores its login in the macOS Keychain. The extension reads that item only after you choose **Connect Claude Code**. It uses the system `security` tool, so macOS asks you first. It reads only the access token, and it never refreshes or writes it.
+- Claude Code stores its login in the macOS Keychain. The extension reads that item only after you choose **Connect Claude Code**. It uses the system `security` tool, so macOS asks you first. It reads the access token, and while a sign-in is waiting it reads only the item's modified date, which doesn't open that prompt. It never refreshes or writes the item.
 - Claude's usage comes from the Keychain, from `~/.claude/.credentials.json` when it exists, or from the session cookie.
 - The extension never writes to other apps' files. It never refreshes a token in a way that would sign out Claude Code or Codex, since those CLIs rotate their refresh tokens.
 - Cursor's local database is opened read-only, with the system `sqlite3` tool.

@@ -26,7 +26,8 @@ const SIGN_IN_HINT =
   "Choose Connect Cursor from this item's actions.\n" +
   'Or paste the WorkosCursorSessionToken cookie from cursor.com (Developer Tools > Application > Cookies) into the "Cursor Session Cookie" preference';
 const COOKIE_AUTH_HINT =
-  'Copy a fresh WorkosCursorSessionToken cookie from cursor.com into the "Cursor Session Cookie" preference';
+  "Choose Use Cursor Session Cookie from this item's actions and paste a fresh WorkosCursorSessionToken cookie from " +
+  'cursor.com, or update the "Cursor Session Cookie" preference';
 const APP_AUTH_HINT = "Open Cursor to refresh its login";
 
 interface CursorSession {

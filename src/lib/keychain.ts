@@ -32,6 +32,44 @@ export function claudeKeychainService(configDir: string | undefined, homedir: st
   return `${DEFAULT_SERVICE}-${hash}`;
 }
 
+export type KeychainItemDate =
+  // The modified date as security prints it, such as "20261014120000Z\000". It changes whenever the item is written.
+  | { kind: "found"; modified: string }
+  // No item has this service name.
+  | { kind: "missing" }
+  // Not macOS, so there is no Keychain to read.
+  | { kind: "unsupported" }
+  // security failed for another reason, or printed no modified date.
+  | { kind: "error" };
+
+// The line of `security find-generic-password` output that holds the modified date. The date is in quotes after its hex
+// value, and the hex is used when there are no quotes.
+const MODIFIED_LINE = /"mdat"<timedate>=0x([0-9A-Fa-f]+)(?:[ \t]+"([^"]*)")?/;
+
+// Reads when a generic-password item was last written, from its attributes only. Without -w, macOS answers without the
+// access dialog, so this can run as often as needed. Claude Code writes its login again each time it changes it, so a new
+// date means a new login.
+export async function readKeychainItemDate(deps: Deps, service: string): Promise<KeychainItemDate> {
+  if (deps.platform !== "darwin") {
+    return { kind: "unsupported" };
+  }
+
+  let result: RunResult;
+  try {
+    result = await deps.run(SECURITY, ["find-generic-password", "-s", service]);
+  } catch {
+    return { kind: "error" };
+  }
+  if (result.exitCode === ITEM_NOT_FOUND) {
+    return { kind: "missing" };
+  }
+  const match = result.exitCode === 0 ? MODIFIED_LINE.exec(result.stdout) : null;
+  if (!match) {
+    return { kind: "error" };
+  }
+  return { kind: "found", modified: match[2] || match[1] };
+}
+
 // Reads the password of a generic-password item. Only exit code 0 and 44 are answers about the item. Any other exit code
 // is a refused or cancelled access dialog, so it counts as denied.
 export async function readKeychainPassword(deps: Deps, service: string): Promise<KeychainRead> {

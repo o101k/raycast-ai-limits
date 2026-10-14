@@ -44,6 +44,9 @@ export interface ProviderUsage {
   source: string;
   // When the data was fetched, in epoch milliseconds.
   fetchedAt: number;
+  // Set when macOS refused the Keychain read and the claude.ai session answered instead. The UI turns the Keychain setting
+  // off, as it does for a failed refresh, so macOS isn't asked again on every refresh.
+  keychainDenied?: true;
 }
 
 // User settings the providers read. Built from the Raycast preferences by the command, so providers and tests don't

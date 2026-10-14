@@ -14,7 +14,8 @@ const OAUTH_HINT =
   "Open Claude Code to refresh its login, then choose Connect Claude Code from this item's actions. " +
   "Or add your claude.ai session key in the extension preferences.";
 const SESSION_HINT =
-  "Your claude.ai session key expired. Copy a fresh sessionKey cookie from claude.ai into the extension preferences.";
+  "Choose Use Claude Session Key from this item's actions and paste a fresh sessionKey cookie, " +
+  "or update the Claude Session Key preference.";
 const KEYCHAIN_DENIED_HINT =
   "Choose Connect Claude Code from this item's actions again.\n" +
   "When macOS asks for access to Claude Code's login, click Always Allow.";
@@ -87,11 +88,7 @@ export async function fetchClaudeUsage(deps: Deps, settings: Settings): Promise<
 
   if (oauth.kind === "denied") {
     if (sessionKey) {
-      return fallbackToSession(
-        deps,
-        sessionKey,
-        "macOS denied access to Claude Code's Keychain login, used claude.ai session",
-      );
+      return fallbackAfterDeniedKeychain(deps, sessionKey);
     }
     throw new ProviderError(
       "auth",
@@ -302,7 +299,31 @@ async function fallbackToSession(deps: Deps, sessionKey: string, note: string): 
     return await fetchWithSession(deps, sessionKey, [note]);
   } catch (error) {
     if (error instanceof ProviderError) {
-      throw new ProviderError(error.kind, `claude.ai session failed: ${error.message}`, error.hint, error.status);
+      throw new ProviderError(
+        error.kind,
+        `claude.ai session failed: ${error.message}`,
+        error.hint,
+        error.status,
+        error.code,
+      );
+    }
+    throw error;
+  }
+}
+
+// The session answers when macOS denied the Keychain read. Both outcomes carry the denial, so the UI turns the Keychain
+// setting off. Otherwise every refresh would ask macOS again, even when the session works.
+async function fallbackAfterDeniedKeychain(deps: Deps, sessionKey: string): Promise<ProviderUsage> {
+  try {
+    const usage = await fallbackToSession(
+      deps,
+      sessionKey,
+      "macOS denied access to Claude Code's Keychain login, used claude.ai session",
+    );
+    return { ...usage, keychainDenied: true };
+  } catch (error) {
+    if (error instanceof ProviderError) {
+      throw new ProviderError(error.kind, error.message, error.hint, error.status, "keychain-denied");
     }
     throw error;
   }

@@ -65,12 +65,16 @@ export async function fetchCopilotUsage(deps: Deps, settings: Settings): Promise
   } catch (error) {
     // 404 is how this endpoint says the account has no Copilot seat, which is a setup problem rather than an error.
     if (error instanceof ProviderError && error.status === 404) {
+      // Connect GitHub is hidden while a preference token is set, so that hint names the preference instead.
       throw new ProviderError(
         "not-connected",
         "No Copilot subscription on this GitHub account",
-        "Choose Connect GitHub from this item's actions, and sign in with an account that has Copilot " +
-          "(see github.com/settings/copilot).\n" +
-          "Or paste a token for that account into the GitHub Token for Copilot preference",
+        preferenceToken
+          ? "Paste a token for an account that has Copilot (see github.com/settings/copilot) " +
+              "into the GitHub Token for Copilot preference"
+          : "Choose Connect GitHub from this item's actions, and sign in with an account that has Copilot " +
+              "(see github.com/settings/copilot).\n" +
+              "Or paste a token for that account into the GitHub Token for Copilot preference",
       );
     }
     throw error;

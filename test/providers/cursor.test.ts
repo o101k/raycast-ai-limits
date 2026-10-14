@@ -295,6 +295,8 @@ describe("fetchCursorUsage requests", () => {
 
     expect(error).toMatchObject({ kind: "auth" });
     expect((error as ProviderError).hint).toContain("Cursor Session Cookie");
+    // The fallback action is named first, and the preference second.
+    expect((error as ProviderError).hint).toMatch(/^Choose Use Cursor Session Cookie from this item's actions/);
     expect((error as ProviderError).message).not.toContain("stale");
   });
 
