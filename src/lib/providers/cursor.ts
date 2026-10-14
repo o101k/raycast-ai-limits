@@ -15,8 +15,8 @@ import { Balance, ProviderError, ProviderUsage, Settings, UsageWindow } from "..
 const USAGE_URL = "https://cursor.com/api/usage-summary";
 const ME_URL = "https://cursor.com/api/auth/me";
 const COOKIE_NAME = "WorkosCursorSessionToken";
-const STATE_DB = "/Library/Application Support/Cursor/User/globalStorage/state.vscdb";
-const TOKEN_QUERY = "SELECT value FROM ItemTable WHERE key = 'cursorAuth/accessToken' LIMIT 1;";
+export const STATE_DB = "/Library/Application Support/Cursor/User/globalStorage/state.vscdb";
+export const TOKEN_QUERY = "SELECT value FROM ItemTable WHERE key = 'cursorAuth/accessToken' LIMIT 1;";
 
 // The app's access token is refused when it expires within a minute, so a request doesn't start with a token that
 // expires mid-flight.
