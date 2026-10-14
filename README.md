@@ -54,7 +54,3 @@ Cookies expire when the site signs you out. When a provider says the credentials
 - The extension never writes to other apps' files. It never refreshes a token in a way that would sign out Claude Code or Codex, since those CLIs rotate their refresh tokens.
 - Cursor's local database is opened read-only, with the system `sqlite3` tool.
 - The usage numbers are cached on this Mac so the list opens instantly. Nothing is sent anywhere else. There is no analytics.
-
-## Inspired by CodexBar
-
-This extension is inspired by [CodexBar](https://github.com/steipete/CodexBar), a menu bar app for the same kind of usage numbers. The provider endpoints and credential locations follow the way CodexBar reads them.
