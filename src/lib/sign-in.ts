@@ -138,7 +138,7 @@ export async function waitFor(
   },
 ): Promise<boolean> {
   const { intervalMs, timeoutMs, now, signal } = options;
-  const sleep = options.sleep ?? defaultSleep;
+  const sleep = options.sleep ?? ((ms: number) => defaultSleep(ms, signal));
   const deadline = now() + timeoutMs;
   while (!signal?.aborted) {
     if (await passes(check)) {
@@ -162,8 +162,18 @@ async function passes(check: () => Promise<boolean>): Promise<boolean> {
   }
 }
 
-function defaultSleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+// Waits `ms`, or less when `signal` aborts, so a stopped Connect doesn't keep its wait running. The abort listener is
+// removed once the wait ends, so a signal that lives on doesn't collect listeners.
+function defaultSleep(ms: number, signal: AbortSignal | undefined): Promise<void> {
+  return new Promise((resolve) => {
+    const finish = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, ms);
+    signal?.addEventListener("abort", finish, { once: true });
+  });
 }
 
 // Codex's login file as text. It lives in CODEX_HOME when that is set, the same as codex.ts reads it. Connect compares

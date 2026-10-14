@@ -9,6 +9,8 @@ const FALLBACK_URL = "https://api.kimi.ai/coding/v1/usages";
 export const CREATE_KEY_URL = "https://www.kimi.com/code/console";
 const AUTH_HINT =
   "Choose Connect Kimi Code from this item's actions to enter a new key, or check the key in the extension preferences";
+// Used when the key comes from the preferences. Connect is hidden then, so the hint doesn't name it.
+const PREFERENCE_AUTH_HINT = "Check the Kimi Code API key in the extension preferences";
 const FIVE_HOUR_MINUTES = 300;
 const WEEKLY_MINUTES = 7 * 24 * 60;
 const MONTHLY_MINUTES = 30 * 24 * 60;
@@ -44,7 +46,8 @@ export async function fetchKimiUsage(deps: Deps, settings: Settings): Promise<Pr
     );
   }
 
-  const options = { provider: "Kimi Code", headers: { Authorization: `Bearer ${apiKey}` }, authHint: AUTH_HINT };
+  const authHint = settings.kimiApiKeySource === "preference" ? PREFERENCE_AUTH_HINT : AUTH_HINT;
+  const options = { provider: "Kimi Code", headers: { Authorization: `Bearer ${apiKey}` }, authHint };
   let json: unknown;
   try {
     json = await requestJson(deps, PRIMARY_URL, options);

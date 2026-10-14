@@ -61,6 +61,37 @@ describe("toSettings", () => {
     expect(toSettings(prefs(), {}, "  ").githubOAuthToken).toBeUndefined();
   });
 
+  describe("credential sources", () => {
+    it.each([
+      ["claudeSessionKey", "claudeSessionKeySource"],
+      ["cursorCookie", "cursorCookieSource"],
+      ["openrouterApiKey", "openrouterApiKeySource"],
+      ["zaiApiKey", "zaiApiKeySource"],
+      ["kimiApiKey", "kimiApiKeySource"],
+      ["deepseekApiKey", "deepseekApiKeySource"],
+      ["moonshotApiKey", "moonshotApiKeySource"],
+    ] as const)("records where %s came from, so hints can name the right fix", (value, source) => {
+      expect(toSettings(prefs({ [value]: "typed" }), { [value]: "stored" } as Connections)[source]).toBe("preference");
+      expect(toSettings(prefs({ [value]: "  " }), { [value]: "stored" } as Connections)[source]).toBe("connection");
+      expect(toSettings(prefs(), { [value]: "  " } as Connections)[source]).toBeUndefined();
+    });
+
+    it("leaves the source unset when the value is set nowhere", () => {
+      const settings = toSettings(prefs());
+
+      expect(settings.claudeSessionKeySource).toBeUndefined();
+      expect(settings.cursorCookieSource).toBeUndefined();
+      expect(settings.openrouterApiKeySource).toBeUndefined();
+    });
+
+    it("keeps the value and its source from the same place, so a preference never reads as a saved connection", () => {
+      const settings = toSettings(prefs({ cursorCookie: "cookie-typed" }), { cursorCookie: "cookie-stored" });
+
+      expect(settings.cursorCookie).toBe("cookie-typed");
+      expect(settings.cursorCookieSource).toBe("preference");
+    });
+  });
+
   describe("with stored connections", () => {
     it("uses a stored connection when the preference is empty", () => {
       const connections: Connections = { openrouterApiKey: "sk-or-v1-stored", cursorCookie: "cookie-stored" };

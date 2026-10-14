@@ -16,6 +16,8 @@ const OAUTH_HINT =
 const SESSION_HINT =
   "Choose Use Claude Session Key from this item's actions and paste a fresh sessionKey cookie, " +
   "or update the Claude Session Key preference.";
+// Used when the key comes from the preference. The fallback action is hidden then, so the hint names the preference.
+const SESSION_PREFERENCE_HINT = "Paste a fresh sessionKey cookie into the Claude Session Key preference";
 const KEYCHAIN_DENIED_HINT =
   "Choose Connect Claude Code from this item's actions again.\n" +
   "When macOS asks for access to Claude Code's login, click Always Allow.";
@@ -63,32 +65,48 @@ type OAuthState =
   | { kind: "denied" }
   | { kind: "present"; from: CredentialSource; credential: OAuthCredential };
 
+// A claude.ai session key, with the hint for when claude.ai rejects it.
+interface SessionLogin {
+  key: string;
+  hint: string;
+}
+
+// The session key the settings give, if any. The hint names the preference when the key came from there, and the
+// Use Claude Session Key action when it was saved by Connect.
+function sessionLogin(settings: Settings): SessionLogin | undefined {
+  const key = extractSessionKey(settings.claudeSessionKey);
+  if (!key) {
+    return undefined;
+  }
+  return { key, hint: settings.claudeSessionKeySource === "preference" ? SESSION_PREFERENCE_HINT : SESSION_HINT };
+}
+
 export async function fetchClaudeUsage(deps: Deps, settings: Settings): Promise<ProviderUsage> {
-  const sessionKey = extractSessionKey(settings.claudeSessionKey);
+  const session = sessionLogin(settings);
   const oauth = await readOAuthCredential(deps, settings);
 
   if (oauth.kind === "present") {
     const problem = checkOAuthUsable(oauth.credential, deps.now());
     if (problem) {
-      if (!sessionKey) {
+      if (!session) {
         throw new ProviderError("auth", problem.message, OAUTH_HINT);
       }
-      return fallbackToSession(deps, sessionKey, problem.note);
+      return fallbackToSession(deps, session, problem.note);
     }
     try {
       return await fetchWithOAuth(deps, oauth.credential, oauth.from);
     } catch (error) {
       // Only a failed request can be retried on the web API. A usage body we can't read would fail the same way there.
-      if (!sessionKey || !(error instanceof ProviderError) || (error.kind !== "auth" && error.kind !== "http")) {
+      if (!session || !(error instanceof ProviderError) || (error.kind !== "auth" && error.kind !== "http")) {
         throw error;
       }
-      return fallbackToSession(deps, sessionKey, oauthFailureNote(error));
+      return fallbackToSession(deps, session, oauthFailureNote(error));
     }
   }
 
   if (oauth.kind === "denied") {
-    if (sessionKey) {
-      return fallbackAfterDeniedKeychain(deps, sessionKey);
+    if (session) {
+      return fallbackAfterDeniedKeychain(deps, session);
     }
     throw new ProviderError(
       "auth",
@@ -99,8 +117,8 @@ export async function fetchClaudeUsage(deps: Deps, settings: Settings): Promise<
     );
   }
 
-  if (sessionKey) {
-    return fetchWithSession(deps, sessionKey, []);
+  if (session) {
+    return fetchWithSession(deps, session, []);
   }
   if (oauth.kind === "invalid") {
     const where = oauth.from === "keychain" ? "Claude Code's Keychain login" : "Claude Code's credentials file";
@@ -294,9 +312,9 @@ function tierPlan(tier: string | undefined): string | undefined {
 }
 
 // Used when the OAuth path fails. A session failure is the one the user can act on, so its message names the session.
-async function fallbackToSession(deps: Deps, sessionKey: string, note: string): Promise<ProviderUsage> {
+async function fallbackToSession(deps: Deps, session: SessionLogin, note: string): Promise<ProviderUsage> {
   try {
-    return await fetchWithSession(deps, sessionKey, [note]);
+    return await fetchWithSession(deps, session, [note]);
   } catch (error) {
     if (error instanceof ProviderError) {
       throw new ProviderError(
@@ -313,11 +331,11 @@ async function fallbackToSession(deps: Deps, sessionKey: string, note: string): 
 
 // The session answers when macOS denied the Keychain read. Both outcomes carry the denial, so the UI turns the Keychain
 // setting off. Otherwise every refresh would ask macOS again, even when the session works.
-async function fallbackAfterDeniedKeychain(deps: Deps, sessionKey: string): Promise<ProviderUsage> {
+async function fallbackAfterDeniedKeychain(deps: Deps, session: SessionLogin): Promise<ProviderUsage> {
   try {
     const usage = await fallbackToSession(
       deps,
-      sessionKey,
+      session,
       "macOS denied access to Claude Code's Keychain login, used claude.ai session",
     );
     return { ...usage, keychainDenied: true };
@@ -337,21 +355,21 @@ function oauthFailureNote(error: ProviderError): string {
   return `Claude Code token couldn't be used (${reason}), used claude.ai session`;
 }
 
-async function fetchWithSession(deps: Deps, sessionKey: string, notes: string[]): Promise<ProviderUsage> {
+async function fetchWithSession(deps: Deps, session: SessionLogin, notes: string[]): Promise<ProviderUsage> {
   const headers = {
-    Cookie: `sessionKey=${sessionKey}`,
+    Cookie: `sessionKey=${session.key}`,
     "User-Agent": "AI-Limits-Raycast",
   };
   const organizations = await requestJson(deps, CLAUDE_AI, {
     provider: "Claude",
     headers,
-    authHint: SESSION_HINT,
+    authHint: session.hint,
   });
   const org = chooseOrganization(organizations);
   const json = await requestJson(deps, `${CLAUDE_AI}/${encodeURIComponent(org.uuid)}/usage`, {
     provider: "Claude",
     headers,
-    authHint: SESSION_HINT,
+    authHint: session.hint,
   });
   const usage = parseClaudeUsage(json);
 

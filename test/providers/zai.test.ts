@@ -120,6 +120,18 @@ describe("fetchZaiUsage", () => {
     }
   });
 
+  it("names the preference in the auth hint when the key came from there, since Connect is hidden", async () => {
+    const deps = fakeDeps({ routes: [{ prefix: GLOBAL_URL, respond: { status: 401, body: {} } }] });
+    const error = await errorOf(fetchZaiUsage(deps, { ...settings, zaiApiKeySource: "preference" }));
+    expect(error.hint).toBe("Check the z.ai API key in the extension preferences");
+  });
+
+  it("gives a key the envelope rejects the hint it is passed, so the source decides it there too", () => {
+    const rejected = () =>
+      parseZaiUsage({ code: 401, msg: "bad token", success: false }, NOW, "Check the z.ai API key");
+    expect(errorOfSync(rejected).hint).toBe("Check the z.ai API key");
+  });
+
   it("throws auth with the preferences hint on a 401", async () => {
     const deps = fakeDeps({ routes: [{ prefix: GLOBAL_URL, respond: { status: 401, body: {} } }] });
     const error = await errorOf(fetchZaiUsage(deps, settings));

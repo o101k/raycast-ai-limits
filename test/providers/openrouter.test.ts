@@ -87,6 +87,14 @@ describe("fetchOpenRouterUsage", () => {
     );
   });
 
+  it("names the preference in the auth hint when the key came from there, since Connect is hidden", async () => {
+    const deps = fakeDeps({ routes: routes({ error: "unauthorized" }, { error: "unauthorized" }, 401, 401) });
+    const error = await fetchOpenRouterUsage(deps, { ...settings, openrouterApiKeySource: "preference" }).catch(
+      (e: unknown) => e,
+    );
+    expect((error as ProviderError).hint).toBe("Check the OpenRouter API key in the extension preferences");
+  });
+
   it("rethrows the key call's error when both calls fail", async () => {
     const deps = fakeDeps({ routes: routes({}, {}, 500, 403) });
     const error = await fetchOpenRouterUsage(deps, settings).catch((e: unknown) => e);

@@ -71,6 +71,17 @@ describe("fetchKimiUsage", () => {
     }
   });
 
+  it("names the preference in the auth hint when the key came from there, since Connect is hidden", async () => {
+    const deps = fakeDeps({
+      routes: [
+        { prefix: PRIMARY, respond: { status: 401, body: {} } },
+        { prefix: FALLBACK, respond: { status: 401, body: {} } },
+      ],
+    });
+    const error = await fetchKimiUsage(deps, { ...settings, kimiApiKeySource: "preference" }).catch((e: unknown) => e);
+    expect((error as ProviderError).hint).toBe("Check the Kimi Code API key in the extension preferences");
+  });
+
   it("throws auth with the preferences hint when both hosts reject the key", async () => {
     const deps = fakeDeps({
       routes: [

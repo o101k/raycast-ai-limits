@@ -10,6 +10,8 @@ export const CREATE_KEY_URL = "https://platform.moonshot.ai/console/api-keys";
 const AUTH_HINT =
   "Choose Connect Moonshot from this item's actions to enter a new key, " +
   "or check the key and region in the extension preferences";
+// Used when the key comes from the preferences. Connect is hidden then, so the hint doesn't name it.
+const PREFERENCE_AUTH_HINT = "Check the Moonshot API key and region in the extension preferences";
 
 export async function fetchMoonshotUsage(deps: Deps, settings: Settings): Promise<ProviderUsage> {
   const apiKey = settings.moonshotApiKey?.trim();
@@ -26,7 +28,7 @@ export async function fetchMoonshotUsage(deps: Deps, settings: Settings): Promis
   const json = await requestJson(deps, `${china ? CHINA_ORIGIN : GLOBAL_ORIGIN}/v1/users/me/balance`, {
     provider: "Moonshot",
     headers: { Authorization: `Bearer ${apiKey}` },
-    authHint: AUTH_HINT,
+    authHint: settings.moonshotApiKeySource === "preference" ? PREFERENCE_AUTH_HINT : AUTH_HINT,
   });
   // China balances are in yuan. International balances are in US dollars.
   return parseMoonshotUsage(json, china ? "CNY" : "USD", deps.now());

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   CLI_SIGN_IN,
   CURSOR_BUNDLE_ID,
@@ -346,6 +346,36 @@ describe("waitFor", () => {
 
     expect(found).toBe(false);
     expect(calls).toBe(1);
+  });
+
+  it("stops the default wait as soon as the signal aborts, rather than sleeping out the interval", async () => {
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 10);
+    let calls = 0;
+    const started = Date.now();
+
+    const found = await waitFor(
+      async () => {
+        calls += 1;
+        return false;
+      },
+      { intervalMs: 60_000, timeoutMs: 120_000, now: Date.now, signal: controller.signal },
+    );
+
+    expect(found).toBe(false);
+    expect(calls).toBe(1);
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
+  it("removes its abort listener when each default wait ends", async () => {
+    const controller = new AbortController();
+    const add = vi.spyOn(controller.signal, "addEventListener");
+    const remove = vi.spyOn(controller.signal, "removeEventListener");
+
+    await waitFor(async () => false, { intervalMs: 10, timeoutMs: 35, now: Date.now, signal: controller.signal });
+
+    expect(add).toHaveBeenCalled();
+    expect(remove.mock.calls.length).toBe(add.mock.calls.length);
   });
 
   it("does not check at all when the signal has already aborted", async () => {

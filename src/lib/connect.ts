@@ -1,7 +1,7 @@
 import { Connections } from "./connections";
 import { Deps } from "./deps";
-import { claudeKeychainService, readKeychainItemDate, readKeychainPassword } from "./keychain";
-import { ProviderError, Settings } from "./types";
+import { claudeKeychainService, readKeychainItemDate } from "./keychain";
+import { ProviderError, ProviderErrorKind, ProviderId, Settings } from "./types";
 import {
   CLI_SIGN_IN,
   CURSOR_BUNDLE_ID,
@@ -40,17 +40,20 @@ export type ConnectMethod =
 
 export type LocalConnectMethod = Extract<ConnectMethod, { kind: "claude" | "codex" | "gemini" | "cursor" }>;
 
-// What verify found. "ok" means the provider answered. "broken" means the provider rejected the login or can't find one.
-// "denied" means macOS refused the Keychain read, which says nothing about whether the login is good.
+// What verify found. "ok" means the provider answered. "broken" means the provider rejected the login, can't find one or
+// can't read it. "denied" means macOS refused the Keychain read, which says nothing about whether the login is good.
 export type LoginCheck = "ok" | "broken" | "denied";
 
-// Turns the error from a provider's fetch into a check. A failure that is neither a rejected login nor a missing one (no
-// network, for example) says nothing about the login, so it counts as "ok" too.
+// The errors that mean the login itself can't be used.
+const BROKEN_KINDS = new Set<ProviderErrorKind>(["auth", "not-connected", "parse"]);
+
+// Turns the error from a provider's fetch into a check. A login that is rejected, missing or unreadable is "broken". A
+// failure that is none of those (no network, for example) says nothing about the login, so it counts as "ok" too.
 export function loginCheckFromError(error: unknown): LoginCheck {
   if (error instanceof ProviderError && error.code === "keychain-denied") {
     return "denied";
   }
-  if (error instanceof ProviderError && (error.kind === "auth" || error.kind === "not-connected")) {
+  if (error instanceof ProviderError && BROKEN_KINDS.has(error.kind)) {
     return "broken";
   }
   return "ok";
@@ -71,6 +74,19 @@ export function isConnectOverridden(method: ConnectMethod, preferences: Settings
   }
 }
 
+// The fallbacks that save a cookie, by provider, and the Settings field each one saves. A cookie typed into the
+// preferences is used instead of the saved one, so the fallback's action is hidden while that preference is set.
+const FALLBACK_FIELDS: Partial<Record<ProviderId, "claudeSessionKey" | "cursorCookie">> = {
+  claude: "claudeSessionKey",
+  cursor: "cursorCookie",
+};
+
+// Whether a fallback's action would have no effect. `preferences` is the settings built from the preferences alone.
+export function isFallbackOverridden(providerId: ProviderId, preferences: Settings): boolean {
+  const field = FALLBACK_FIELDS[providerId];
+  return field !== undefined && preferences[field] !== undefined;
+}
+
 export interface ConnectUi {
   // Shows what Connect is doing now, such as "Finish signing in in Terminal".
   progress(title: string, message?: string): void;
@@ -78,7 +94,7 @@ export interface ConnectUi {
   save(patch: Partial<Connections>): Promise<void>;
   // Fetches this provider's usage with the latest saved connections, and says whether the login works.
   verify(): Promise<LoginCheck>;
-  // Aborted when the user leaves the command, which stops any waiting.
+  // Aborted when the user leaves the command or Disconnects, which stops any waiting and any saving.
   signal?: AbortSignal;
   // Replaces the wait between checks in tests. The real UI leaves it out.
   sleep?: (ms: number) => Promise<void>;
@@ -103,7 +119,8 @@ const STOPPED: ConnectOutcome = {
   message: "Finish signing in, then refresh",
 };
 
-// The env command sets CLAUDE_CONFIG_DIR or CODEX_HOME for one CLI. It is referenced by absolute path, like the tools.
+// The env command sets or unsets CLAUDE_CONFIG_DIR or CODEX_HOME for one CLI. It is referenced by absolute path, like
+// the tools.
 const ENV = "/usr/bin/env";
 
 // Each sign-in starts with the login that is already there. When it works (ui.verify), nothing is run. Otherwise the
@@ -123,22 +140,29 @@ export async function connectLocal(deps: Deps, method: LocalConnectMethod, ui: C
 
 // Clicking Connect is the consent to read Claude Code's login, so the setting is saved before anything is read.
 async function connectClaude(deps: Deps, ui: ConnectUi): Promise<ConnectOutcome> {
+  // A Connect stopped before this saves nothing and reads nothing.
+  if (ui.signal?.aborted) {
+    return STOPPED;
+  }
   await ui.save({ claudeKeychain: true });
   ui.progress("Connecting Claude Code", "If macOS asks for access to Claude Code's login, choose Always Allow");
 
-  // The password is read only here. Each read of it can show macOS's access dialog, so the wait for the sign-in uses the
-  // item's date instead.
-  const read = await readKeychainPassword(deps, claudeKeychainService(deps.env.CLAUDE_CONFIG_DIR, deps.homedir));
-  if (read.kind === "denied") {
-    return keychainDenied(ui);
-  }
+  // The marker comes from the item's attributes, which never open macOS's access dialog.
   const before = await readClaudeMarker(deps);
   // With no login there is nothing to verify, so the sign-in starts at once.
-  const check = before === null ? undefined : await ui.verify();
+  if (before === null) {
+    return signInClaude(deps, ui, before);
+  }
+  // A Connect stopped while the setting was saved doesn't verify.
+  if (ui.signal?.aborted) {
+    return STOPPED;
+  }
+  // verify is the only read of the password in Connect, so it is the one that can show macOS's access dialog. A refusal
+  // comes back as "denied", and Terminal is not opened for it, since that says nothing about the login.
+  const check = await ui.verify();
   if (check === "ok") {
     return CONNECTED;
   }
-  // macOS refusing the read says nothing about the login, so Terminal is not opened for it.
   if (check === "denied") {
     return keychainDenied(ui);
   }
@@ -210,6 +234,10 @@ function isNewLogin(before: string | null, after: string | null): boolean {
 
 async function connectCodex(deps: Deps, ui: ConnectUi): Promise<ConnectOutcome> {
   const before = await readCodexLogin(deps);
+  // A Connect stopped while the login was read doesn't verify it.
+  if (ui.signal?.aborted) {
+    return STOPPED;
+  }
   if (before !== null && (await ui.verify()) === "ok") {
     return CONNECTED;
   }
@@ -233,6 +261,10 @@ async function connectCodex(deps: Deps, ui: ConnectUi): Promise<ConnectOutcome> 
 
 async function connectGemini(deps: Deps, ui: ConnectUi): Promise<ConnectOutcome> {
   const before = await readGeminiLogin(deps);
+  // A Connect stopped while the login was read doesn't verify it.
+  if (ui.signal?.aborted) {
+    return STOPPED;
+  }
   if (before !== null && (await ui.verify()) === "ok") {
     return CONNECTED;
   }
@@ -255,11 +287,23 @@ async function connectGemini(deps: Deps, ui: ConnectUi): Promise<ConnectOutcome>
   });
 }
 
+// Connect Cursor means the app's login. A cookie saved as a fallback is used before the app's login, so the cookie is
+// left out of the check (usage.tsx does that), and it is cleared only once the app's login is confirmed. A cookie that
+// works is kept when Cursor isn't installed or the sign-in doesn't finish.
 async function connectCursor(deps: Deps, ui: ConnectUi): Promise<ConnectOutcome> {
-  // Connect Cursor means the app's login. A cookie saved as a fallback is used before the app's login, so it is cleared
-  // first, and the check below then looks at the app.
-  await ui.save({ cursorCookie: "" });
+  const outcome = await signInToCursor(deps, ui);
+  if (outcome.kind === "connected") {
+    await ui.save({ cursorCookie: "" });
+  }
+  return outcome;
+}
+
+async function signInToCursor(deps: Deps, ui: ConnectUi): Promise<ConnectOutcome> {
   const before = await readCursorLogin(deps);
+  // A Connect stopped while the login was read doesn't verify it.
+  if (ui.signal?.aborted) {
+    return STOPPED;
+  }
   if (before !== null && (await ui.verify()) === "ok") {
     return CONNECTED;
   }
@@ -314,12 +358,14 @@ async function signInInTerminal(
   return waitForLogin(deps, ui, options.check, options.failure);
 }
 
-// The command Terminal runs for a CLI. Terminal's shell may have another config folder than the one the extension reads
-// (the extension's own environment is Raycast's), so when the extension sets `variable`, it is passed on the command line.
-// The CLI then writes its login where the extension looks for it.
+// The command Terminal runs for a CLI. Terminal's shell may set another config folder than the one the extension reads
+// (the extension's own environment is Raycast's). So the extension's value is passed on the command line, and the
+// variable is removed when the extension has none. Otherwise a folder that only Terminal's shell sets, from the user's
+// shell files, would be used, and the login would be written where the extension never reads it.
 function cliCommand(deps: Deps, variable: string, executable: string, args: readonly string[]): string[] {
   const value = deps.env[variable];
-  return value ? [ENV, `${variable}=${value}`, executable, ...args] : [executable, ...args];
+  const envArgs = value ? [ENV, `${variable}=${value}`] : [ENV, "-u", variable];
+  return [...envArgs, executable, ...args];
 }
 
 // Polls until the login is new. The clock comes from deps, so a test can move it forward. When the wait ends because

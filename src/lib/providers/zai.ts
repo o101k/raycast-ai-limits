@@ -8,6 +8,8 @@ const CHINA_QUOTA_URL = "https://open.bigmodel.cn/api/monitor/usage/quota/limit"
 export const CREATE_KEY_URL = "https://z.ai/manage-apikey/apikey-list";
 const AUTH_HINT =
   "Choose Connect z.ai from this item's actions to enter a new key, or check the key in the extension preferences";
+// Used when the key comes from the preferences. Connect is hidden then, so the hint doesn't name it.
+const PREFERENCE_AUTH_HINT = "Check the z.ai API key in the extension preferences";
 const CODING_PLAN_HINT = "Check that this key belongs to a GLM Coding Plan";
 
 // Codes in the response envelope that mean the key was refused. Other codes are reported as plain HTTP errors.
@@ -45,15 +47,17 @@ export async function fetchZaiUsage(deps: Deps, settings: Settings): Promise<Pro
   }
 
   const url = settings.zaiRegion === "china" ? CHINA_QUOTA_URL : GLOBAL_QUOTA_URL;
+  const authHint = settings.zaiApiKeySource === "preference" ? PREFERENCE_AUTH_HINT : AUTH_HINT;
   const json = await requestJson(deps, url, {
     provider: "z.ai",
     headers: { Authorization: `Bearer ${apiKey}` },
-    authHint: AUTH_HINT,
+    authHint,
   });
-  return parseZaiUsage(json, deps.now());
+  return parseZaiUsage(json, deps.now(), authHint);
 }
 
-export function parseZaiUsage(json: unknown, fetchedAt: number): ProviderUsage {
+// `authHint` is what a rejected key is told to do, and it depends on where the key came from.
+export function parseZaiUsage(json: unknown, fetchedAt: number, authHint = AUTH_HINT): ProviderUsage {
   const root = asRecord(json);
   if (!root) {
     throw new ProviderError("parse", "z.ai returned an unexpected response");
@@ -62,7 +66,7 @@ export function parseZaiUsage(json: unknown, fetchedAt: number): ProviderUsage {
   if (root.success !== true || asNumber(root.code) !== 200) {
     const code = asNumber(root.code);
     if (code !== undefined && AUTH_CODES.has(code)) {
-      throw new ProviderError("auth", `z.ai rejected the API key (code ${code})`, AUTH_HINT);
+      throw new ProviderError("auth", `z.ai rejected the API key (code ${code})`, authHint);
     }
     throw new ProviderError("http", `z.ai quota API error: ${asString(root.msg) ?? "invalid response"}`);
   }

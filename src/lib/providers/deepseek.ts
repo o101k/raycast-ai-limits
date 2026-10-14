@@ -7,6 +7,8 @@ const BALANCE_URL = "https://api.deepseek.com/user/balance";
 export const CREATE_KEY_URL = "https://platform.deepseek.com/api_keys";
 const AUTH_HINT =
   "Choose Connect DeepSeek from this item's actions to enter a new key, or check the key in the extension preferences";
+// Used when the key comes from the preferences. Connect is hidden then, so the hint doesn't name it.
+const PREFERENCE_AUTH_HINT = "Check the DeepSeek API key in the extension preferences";
 
 interface CurrencyBalance {
   currency: string;
@@ -30,7 +32,7 @@ export async function fetchDeepSeekUsage(deps: Deps, settings: Settings): Promis
   const json = await requestJson(deps, BALANCE_URL, {
     provider: "DeepSeek",
     headers: { Authorization: `Bearer ${apiKey}` },
-    authHint: AUTH_HINT,
+    authHint: settings.deepseekApiKeySource === "preference" ? PREFERENCE_AUTH_HINT : AUTH_HINT,
   });
   return parseDeepSeekUsage(json, deps.now());
 }

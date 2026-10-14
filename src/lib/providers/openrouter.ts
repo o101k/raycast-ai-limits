@@ -8,6 +8,8 @@ const CREDITS_URL = "https://openrouter.ai/api/v1/credits";
 export const CREATE_KEY_URL = "https://openrouter.ai/settings/keys";
 const AUTH_HINT =
   "Choose Connect OpenRouter from this item's actions to sign in again, or check the key in the extension preferences";
+// Used when the key comes from the preferences. Connect is hidden then, so the hint doesn't name it.
+const PREFERENCE_AUTH_HINT = "Check the OpenRouter API key in the extension preferences";
 // Sent on every call. OpenRouter shows the title on its activity pages, so it says which app made the requests.
 const APP_HEADERS = { "X-Title": "AI Limits", "HTTP-Referer": "https://raycast.com" };
 
@@ -106,7 +108,7 @@ export async function fetchOpenRouterUsage(deps: Deps, settings: Settings): Prom
   const options = {
     provider: "OpenRouter",
     headers: { Authorization: `Bearer ${apiKey}`, ...APP_HEADERS },
-    authHint: AUTH_HINT,
+    authHint: settings.openrouterApiKeySource === "preference" ? PREFERENCE_AUTH_HINT : AUTH_HINT,
   };
   // The key call is the one that matters. Credits are only a bonus, since keys without credits access can't read them.
   const [keyResult, creditsResult] = await Promise.allSettled([

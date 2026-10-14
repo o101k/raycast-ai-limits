@@ -300,6 +300,18 @@ describe("fetchCursorUsage requests", () => {
     expect((error as ProviderError).message).not.toContain("stale");
   });
 
+  it("names the Cursor Session Cookie preference in the hint when the cookie came from there", async () => {
+    const deps = fakeDeps({ routes: cursorRoutes(summary, 401) });
+    const error = await fetchCursorUsage(deps, { cursorCookie: "stale", cursorCookieSource: "preference" }).catch(
+      (e: unknown) => e,
+    );
+
+    expect(error).toMatchObject({
+      kind: "auth",
+      hint: 'Paste a fresh WorkosCursorSessionToken cookie from cursor.com into the "Cursor Session Cookie" preference',
+    });
+  });
+
   it("returns auth with the open-Cursor hint when the app's login is rejected", async () => {
     const deps = fakeDeps({ routes: cursorRoutes(summary, 403) });
     deps.sqliteResults.set(DB_PATH, appToken());

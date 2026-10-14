@@ -52,6 +52,14 @@ describe("fetchDeepSeekUsage", () => {
     }
   });
 
+  it("names the preference in the auth hint when the key came from there, since Connect is hidden", async () => {
+    const deps = fakeDeps({ routes: [{ prefix: BALANCE_URL, respond: { status: 401, body: {} } }] });
+    const error = await fetchDeepSeekUsage(deps, { ...settings, deepseekApiKeySource: "preference" }).catch(
+      (e: unknown) => e,
+    );
+    expect((error as ProviderError).hint).toBe("Check the DeepSeek API key in the extension preferences");
+  });
+
   it("throws auth with the preferences hint on a 401", async () => {
     const deps = fakeDeps({ routes: [{ prefix: BALANCE_URL, respond: { status: 401, body: {} } }] });
     const error = await fetchDeepSeekUsage(deps, settings).catch((e: unknown) => e);

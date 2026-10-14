@@ -4,12 +4,15 @@ import {
   ConnectMethod,
   ConnectUi,
   isConnectOverridden,
+  isFallbackOverridden,
   LocalConnectMethod,
+  LoginCheck,
   loginCheckFromError,
 } from "../src/lib/connect";
 import { Connections } from "../src/lib/connections";
 import { RunResult } from "../src/lib/deps";
 import { claudeKeychainService } from "../src/lib/keychain";
+import { fetchClaudeUsage } from "../src/lib/providers/claude";
 import { STATE_DB } from "../src/lib/providers/cursor";
 import { CURSOR_BUNDLE_ID } from "../src/lib/sign-in";
 import { ProviderError, Settings } from "../src/lib/types";
@@ -134,6 +137,39 @@ function terminalScript(deps: FakeDeps): string | undefined {
   return deps.runCalls.find((call) => call.file === OSASCRIPT)?.args[1];
 }
 
+// What Connect returns when it was stopped before it did anything. Nothing is saved, read or opened.
+const STOPPED_OUTCOME = { kind: "failed", title: "Connect stopped", message: "Finish signing in, then refresh" };
+
+// Answers the Keychain item's attributes, the only Keychain read connectLocal makes itself. Tests that fake verify have no
+// password read to answer, since verify is the one that reads the password.
+function keychainAttributes(deps: FakeDeps, ...answers: RunResult[]) {
+  deps.programs.push({ file: SECURITY, respond: inOrder(...answers) });
+}
+
+// The password reads (`security -w`) a Connect made. These are the reads that can show macOS's access dialog.
+function passwordReads(deps: FakeDeps): number {
+  return deps.runCalls.filter((call) => call.args.includes("-w")).length;
+}
+
+const CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
+
+// The check usage.tsx runs for Claude: the Claude Code login alone, read the way a refresh reads it. The usage request is
+// answered by a fake route, so the Keychain is read exactly as it is in the app.
+function claudeVerify(deps: FakeDeps): () => Promise<LoginCheck> {
+  deps.routes.push({
+    prefix: CLAUDE_USAGE_URL,
+    respond: { body: { five_hour: { utilization: 10, resets_at: null } } },
+  });
+  return async () => {
+    try {
+      await fetchClaudeUsage(deps, { claudeKeychain: true });
+      return "ok";
+    } catch (error) {
+      return loginCheckFromError(error);
+    }
+  };
+}
+
 const CLAUDE: LocalConnectMethod = { kind: "claude" };
 const CODEX: LocalConnectMethod = { kind: "codex" };
 const GEMINI: LocalConnectMethod = { kind: "gemini" };
@@ -144,14 +180,13 @@ describe("connectLocal for Claude Code on macOS", () => {
     const deps = withTools(fakeDeps());
     const { ui, saved } = testUi();
     let consentAtRead: number | undefined;
-    keychain(
-      deps,
-      () => {
+    deps.programs.push({
+      file: SECURITY,
+      respond: () => {
         consentAtRead = saved.length;
-        return FOUND;
+        return ITEM;
       },
-      inOrder(ITEM),
-    );
+    });
 
     await connectLocal(deps, CLAUDE, ui);
 
@@ -159,9 +194,9 @@ describe("connectLocal for Claude Code on macOS", () => {
     expect(saved).toEqual([{ claudeKeychain: true }]);
   });
 
-  it("connects without signing in when the Keychain login works", async () => {
+  it("connects without signing in when the Keychain login works, and reads no password itself", async () => {
     const deps = withTools(fakeDeps());
-    keychain(deps, inOrder(FOUND), inOrder(ITEM));
+    keychainAttributes(deps, ITEM);
     const { ui, progress } = testUi();
 
     expect(await connectLocal(deps, CLAUDE, ui)).toEqual({ kind: "connected" });
@@ -169,39 +204,36 @@ describe("connectLocal for Claude Code on macOS", () => {
       "Connecting Claude Code",
       "If macOS asks for access to Claude Code's login, choose Always Allow",
     );
-    expect(deps.runCalls.map((call) => call.file)).toEqual([SECURITY, SECURITY]);
+    expect(deps.runCalls.map((call) => call.file)).toEqual([SECURITY]);
+    expect(passwordReads(deps)).toBe(0);
   });
 
   it("reads the Keychain item for the config folder Claude Code uses", async () => {
     const deps = withTools(fakeDeps());
     deps.env.CLAUDE_CONFIG_DIR = "/work/claude";
-    keychain(deps, inOrder(FOUND), inOrder(ITEM));
+    keychainAttributes(deps, ITEM);
 
     await connectLocal(deps, CLAUDE, testUi().ui);
 
-    expect(deps.runCalls[0].args).toEqual([
-      "find-generic-password",
-      "-s",
-      claudeKeychainService("/work/claude", HOME),
-      "-w",
-    ]);
-    expect(deps.runCalls[1].args).toEqual(["find-generic-password", "-s", claudeKeychainService("/work/claude", HOME)]);
+    expect(deps.runCalls[0].args).toEqual(["find-generic-password", "-s", claudeKeychainService("/work/claude", HOME)]);
   });
 
   it("signs in again when verify says the Keychain login was rejected, and connects once it changes", async () => {
     const deps = withTools(fakeDeps(), [CLAUDE_BIN]);
-    keychain(deps, inOrder(FOUND), inOrder(ITEM, ITEM_REWRITTEN));
+    keychainAttributes(deps, ITEM, ITEM_REWRITTEN);
     deps.programs.push({ file: OSASCRIPT, respond: OK });
     const verify = vi.fn(async () => "broken" as const);
 
     expect(await connectLocal(deps, CLAUDE, testUi({ verify }).ui)).toEqual({ kind: "connected" });
     expect(verify).toHaveBeenCalledTimes(1);
-    expect(terminalScript(deps)).toContain(`do script "'${CLAUDE_BIN}' 'auth' 'login'"`);
+    expect(terminalScript(deps)).toContain(
+      `do script "'/usr/bin/env' '-u' 'CLAUDE_CONFIG_DIR' '${CLAUDE_BIN}' 'auth' 'login'"`,
+    );
   });
 
   it("keeps polling while the Keychain item is unchanged, and gives up after 10 minutes", async () => {
     const deps = withTools(fakeDeps(), [CLAUDE_BIN]);
-    keychain(deps, inOrder(FOUND), inOrder(ITEM));
+    keychainAttributes(deps, ITEM);
     deps.programs.push({ file: OSASCRIPT, respond: OK });
     const clock = steppingClock(deps);
 
@@ -213,58 +245,25 @@ describe("connectLocal for Claude Code on macOS", () => {
     expect(clock.sleeps.every((ms) => ms === POLL_INTERVAL_MS)).toBe(true);
   });
 
-  it("reads the password once, at the start, and only reads the item's date while it waits for the sign-in", async () => {
+  it("reads the item's date while it waits for the sign-in, and never reads the password itself", async () => {
     const deps = withTools(fakeDeps(), [CLAUDE_BIN]);
-    let passwordReads = 0;
-    let dateReads = 0;
-    keychain(
-      deps,
-      () => {
-        passwordReads++;
-        return FOUND;
-      },
-      () => {
-        dateReads++;
-        return ITEM;
-      },
-    );
+    keychainAttributes(deps, ITEM);
     deps.programs.push({ file: OSASCRIPT, respond: OK });
     const clock = steppingClock(deps);
 
     await connectLocal(deps, CLAUDE, testUi({ verify: async () => "broken", sleep: clock.sleep }).ui);
 
-    expect(passwordReads).toBe(1);
-    expect(dateReads).toBeGreaterThan(POLL_TOTAL_MS / POLL_INTERVAL_MS);
+    expect(passwordReads(deps)).toBe(0);
+    // The marker read, then one read per check while it waits: more reads than polls in 10 minutes.
+    const securityReads = deps.runCalls.filter((call) => call.file === SECURITY).length;
+    expect(securityReads).toBeGreaterThan(POLL_TOTAL_MS / POLL_INTERVAL_MS);
   });
 
-  it("fails with the Always Allow steps when macOS denies the Keychain read, without signing in", async () => {
+  it("fails with the Always Allow steps when verify reports macOS denied the read, without signing in", async () => {
     const deps = withTools(fakeDeps(), [CLAUDE_BIN]);
-    deps.programs.push({ file: SECURITY, respond: DENIED });
-    const verify = vi.fn(async () => "ok" as const);
-
-    expect(await connectLocal(deps, CLAUDE, testUi({ verify }).ui)).toEqual({
-      kind: "failed",
-      title: "macOS denied access to Claude Code's login",
-      message: "Choose Connect again and click Always Allow",
-    });
-    expect(deps.runCalls.map((call) => call.file)).toEqual([SECURITY]);
-    expect(verify).not.toHaveBeenCalled();
-  });
-
-  it("turns the Keychain setting back off when macOS denies the read, so later refreshes don't ask again", async () => {
-    const deps = withTools(fakeDeps(), [CLAUDE_BIN]);
-    deps.programs.push({ file: SECURITY, respond: DENIED });
-    const { ui, saved } = testUi();
-
-    await connectLocal(deps, CLAUDE, ui);
-
-    expect(saved).toEqual([{ claudeKeychain: true }, { claudeKeychain: false }]);
-  });
-
-  it("ends like a denied read when macOS denies the password during verify, and does not sign in", async () => {
-    const deps = withTools(fakeDeps(), [CLAUDE_BIN]);
-    keychain(deps, inOrder(FOUND), inOrder(ITEM));
-    const { ui, saved, progress } = testUi({ verify: async () => "denied" });
+    keychainAttributes(deps, ITEM);
+    const verify = vi.fn(async () => "denied" as const);
+    const { ui, saved, progress } = testUi({ verify });
 
     expect(await connectLocal(deps, CLAUDE, ui)).toEqual({
       kind: "failed",
@@ -276,9 +275,31 @@ describe("connectLocal for Claude Code on macOS", () => {
     expect(progress).not.toHaveBeenCalledWith("Finish signing in in Terminal", expect.anything());
   });
 
+  it("turns the Keychain setting back off when macOS denies the read, so later refreshes don't ask again", async () => {
+    const deps = withTools(fakeDeps(), [CLAUDE_BIN]);
+    keychain(deps, () => DENIED, inOrder(ITEM));
+    const { ui, saved } = testUi({ verify: claudeVerify(deps) });
+
+    expect(await connectLocal(deps, CLAUDE, ui)).toEqual({
+      kind: "failed",
+      title: "macOS denied access to Claude Code's login",
+      message: "Choose Connect again and click Always Allow",
+    });
+    expect(saved).toEqual([{ claudeKeychain: true }, { claudeKeychain: false }]);
+  });
+
+  it("reads the Keychain password once in a full Connect with a working login, inside verify", async () => {
+    const deps = withTools(fakeDeps(), [CLAUDE_BIN]);
+    keychain(deps, () => FOUND, inOrder(ITEM));
+    const { ui } = testUi({ verify: claudeVerify(deps) });
+
+    expect(await connectLocal(deps, CLAUDE, ui)).toEqual({ kind: "connected" });
+    expect(passwordReads(deps)).toBe(1);
+  });
+
   it("signs in in Terminal when the Keychain has no login, then connects once one appears", async () => {
     const deps = withTools(fakeDeps(), [CLAUDE_BIN]);
-    keychain(deps, inOrder(MISSING), inOrder(MISSING, ITEM));
+    keychainAttributes(deps, MISSING, ITEM);
     deps.programs.push({ file: OSASCRIPT, respond: OK });
     const verify = vi.fn(async () => "ok" as const);
     const { ui, progress } = testUi({ verify });
@@ -290,12 +311,14 @@ describe("connectLocal for Claude Code on macOS", () => {
       "Finish signing in in Terminal",
       "Paste the code in Terminal if Claude Code asks for it",
     );
-    expect(terminalScript(deps)).toContain(`do script "'${CLAUDE_BIN}' 'auth' 'login'"`);
+    expect(terminalScript(deps)).toContain(
+      `do script "'/usr/bin/env' '-u' 'CLAUDE_CONFIG_DIR' '${CLAUDE_BIN}' 'auth' 'login'"`,
+    );
   });
 
   it("signs in without verifying when the item's date can't be read, since there is no marker to compare", async () => {
     const deps = withTools(fakeDeps(), [CLAUDE_BIN]);
-    keychain(deps, inOrder(FOUND), inOrder(failure("security: unexpected failure")));
+    keychainAttributes(deps, failure("security: unexpected failure"));
     deps.programs.push({ file: OSASCRIPT, respond: OK });
     const verify = vi.fn(async () => "ok" as const);
     const clock = steppingClock(deps);
@@ -312,7 +335,7 @@ describe("connectLocal for Claude Code on macOS", () => {
     deps.programs.push({ file: SECURITY, respond: MISSING });
 
     expect(await connectLocal(deps, CLAUDE, testUi().ui)).toEqual({ kind: "connected" });
-    expect(deps.runCalls.map((call) => call.file)).toEqual([SECURITY, SECURITY]);
+    expect(deps.runCalls.map((call) => call.file)).toEqual([SECURITY]);
   });
 
   it("signs in again when verify rejects the credentials file, and connects once the file changes", async () => {
@@ -361,6 +384,24 @@ describe("connectLocal for Claude Code on macOS", () => {
     expect(await connectLocal(deps, CLAUDE, testUi().ui)).toEqual({ kind: "connected" });
     expect(terminalScript(deps)).toContain(
       `do script "'/usr/bin/env' 'CLAUDE_CONFIG_DIR=/work/claude' '${CLAUDE_BIN}' 'auth' 'login'"`,
+    );
+  });
+
+  it("removes CLAUDE_CONFIG_DIR from the command when the extension has an empty value, as when it is unset", async () => {
+    const deps = withTools(fakeDeps(), [CLAUDE_BIN]);
+    deps.env.CLAUDE_CONFIG_DIR = "";
+    deps.programs.push({ file: SECURITY, respond: MISSING });
+    deps.programs.push({
+      file: OSASCRIPT,
+      respond: () => {
+        deps.files.set(CLAUDE_CREDENTIALS, "{}");
+        return OK;
+      },
+    });
+
+    expect(await connectLocal(deps, CLAUDE, testUi().ui)).toEqual({ kind: "connected" });
+    expect(terminalScript(deps)).toContain(
+      `do script "'/usr/bin/env' '-u' 'CLAUDE_CONFIG_DIR' '${CLAUDE_BIN}' 'auth' 'login'"`,
     );
   });
 
@@ -481,7 +522,7 @@ describe("connectLocal for Codex", () => {
       "Finish signing in in Terminal",
       "Codex is waiting for its sign-in to finish",
     );
-    expect(terminalScript(deps)).toContain(`do script "'${CODEX_BIN}' 'login'"`);
+    expect(terminalScript(deps)).toContain(`do script "'/usr/bin/env' '-u' 'CODEX_HOME' '${CODEX_BIN}' 'login'"`);
   });
 
   it("runs codex login through env with CODEX_HOME, so auth.json is written to the folder the extension reads", async () => {
@@ -620,12 +661,12 @@ describe("connectLocal for Gemini CLI", () => {
 });
 
 describe("connectLocal for Cursor", () => {
-  it("clears a saved Cursor session cookie before it checks the app's login", async () => {
+  it("clears a saved Cursor session cookie once the app's login is confirmed, and not before", async () => {
     const deps = fakeDeps();
     deps.sqliteResults.set(CURSOR_DB, CURSOR_TOKEN);
     const { ui, saved } = testUi({
       verify: async () => {
-        expect(saved).toEqual([{ cursorCookie: "" }]);
+        expect(saved).toEqual([]);
         return "ok";
       },
     });
@@ -637,11 +678,44 @@ describe("connectLocal for Cursor", () => {
   it("connects without opening Cursor when the app's login works", async () => {
     const deps = fakeDeps();
     deps.sqliteResults.set(CURSOR_DB, `${CURSOR_TOKEN}\n`);
-    const { ui, progress } = testUi();
+    const { ui, progress, saved } = testUi();
 
     expect(await connectLocal(deps, CURSOR, ui)).toEqual({ kind: "connected" });
     expect(deps.runCalls).toEqual([]);
     expect(progress).not.toHaveBeenCalled();
+    expect(saved).toEqual([{ cursorCookie: "" }]);
+  });
+
+  it("keeps a saved cookie when Cursor isn't installed, since the cookie may still work", async () => {
+    const deps = fakeDeps();
+    deps.programs.push({ file: OPEN, respond: failure("Unable to find application") });
+    const { ui, saved } = testUi();
+
+    expect(await connectLocal(deps, CURSOR, ui)).toMatchObject({ kind: "failed", title: "Cursor isn't installed" });
+    expect(saved).toEqual([]);
+  });
+
+  it("keeps a saved cookie when the app's sign-in doesn't finish", async () => {
+    const deps = fakeDeps();
+    deps.programs.push({ file: OPEN, respond: OK });
+    const clock = steppingClock(deps);
+    const { ui, saved } = testUi({ sleep: clock.sleep });
+
+    expect(await connectLocal(deps, CURSOR, ui)).toEqual({ kind: "failed", title: "Cursor sign-in didn't finish" });
+    expect(saved).toEqual([]);
+  });
+
+  it("clears the saved cookie once the app's sign-in finishes", async () => {
+    const deps = fakeDeps();
+    deps.programs.push({ file: OPEN, respond: OK });
+    const { ui, saved } = testUi({
+      sleep: async () => {
+        deps.sqliteResults.set(CURSOR_DB, CURSOR_TOKEN);
+      },
+    });
+
+    expect(await connectLocal(deps, CURSOR, ui)).toEqual({ kind: "connected" });
+    expect(saved).toEqual([{ cursorCookie: "" }]);
   });
 
   it("opens Cursor when verify rejects the app's login, and connects once its token changes", async () => {
@@ -791,6 +865,44 @@ describe("connectLocal when Connect is closed during a sign-in", () => {
   });
 });
 
+describe("connectLocal when the Connect is already stopped", () => {
+  it.each([
+    ["Claude Code", CLAUDE],
+    ["Codex", CODEX],
+    ["Gemini CLI", GEMINI],
+    ["Cursor", CURSOR],
+  ] as const)("saves nothing, reads nothing and opens nothing for %s", async (_, method) => {
+    const deps = withTools(
+      fakeDeps({ files: { [CLAUDE_CREDENTIALS]: "{}", [CODEX_AUTH]: "{}", [GEMINI_CREDENTIALS]: "{}" } }),
+      [CLAUDE_BIN, CODEX_BIN, GEMINI_BIN],
+    );
+    deps.sqliteResults.set(CURSOR_DB, CURSOR_TOKEN);
+    keychainAttributes(deps, ITEM);
+    deps.programs.push({ file: OPEN, respond: OK });
+    deps.programs.push({ file: OSASCRIPT, respond: OK });
+    const controller = new AbortController();
+    controller.abort();
+    const verify = vi.fn(async () => "ok" as const);
+    const { ui, saved } = testUi({ signal: controller.signal, verify });
+
+    expect(await connectLocal(deps, method, ui)).toEqual(STOPPED_OUTCOME);
+    expect(saved).toEqual([]);
+    expect(verify).not.toHaveBeenCalled();
+    expect(deps.runCalls).toEqual([]);
+  });
+
+  it("does not verify when the Connect is stopped while it saves the Keychain setting", async () => {
+    const deps = withTools(fakeDeps(), [CLAUDE_BIN]);
+    keychainAttributes(deps, ITEM);
+    const controller = new AbortController();
+    const verify = vi.fn(async () => "ok" as const);
+    const { ui } = testUi({ signal: controller.signal, verify, save: async () => controller.abort() });
+
+    expect(await connectLocal(deps, CLAUDE, ui)).toEqual(STOPPED_OUTCOME);
+    expect(verify).not.toHaveBeenCalled();
+  });
+});
+
 describe("loginCheckFromError", () => {
   it("is denied for the keychain-denied code, even though that error is an auth error", () => {
     expect(loginCheckFromError(new ProviderError("auth", "denied", undefined, undefined, "keychain-denied"))).toBe(
@@ -798,15 +910,15 @@ describe("loginCheckFromError", () => {
     );
   });
 
-  it.each(["auth", "not-connected"] as const)(
-    "is broken for a %s error, which is a rejected or missing login",
+  it.each(["auth", "not-connected", "parse"] as const)(
+    "is broken for a %s error, which is a rejected, missing or unreadable login",
     (kind) => {
       expect(loginCheckFromError(new ProviderError(kind, "rejected"))).toBe("broken");
     },
   );
 
-  it.each(["http", "parse"] as const)("is ok for a %s error, which says nothing about the login", (kind) => {
-    expect(loginCheckFromError(new ProviderError(kind, "unreachable"))).toBe("ok");
+  it("is ok for an http error, which says nothing about the login", () => {
+    expect(loginCheckFromError(new ProviderError("http", "unreachable"))).toBe("ok");
   });
 
   it("is ok for an error that isn't a ProviderError, such as no network", () => {
@@ -845,5 +957,30 @@ describe("isConnectOverridden", () => {
     expect(isConnectOverridden({ kind: "codex" }, preferences)).toBe(false);
     expect(isConnectOverridden({ kind: "cursor" }, preferences)).toBe(false);
     expect(isConnectOverridden({ kind: "gemini" }, preferences)).toBe(false);
+  });
+});
+
+describe("isFallbackOverridden", () => {
+  it("hides the Claude Session Key fallback only when a session key is set in the preferences", () => {
+    expect(isFallbackOverridden("claude", { claudeSessionKey: "sk-ant-pref" })).toBe(true);
+    expect(isFallbackOverridden("claude", { cursorCookie: "cookie" })).toBe(false);
+    expect(isFallbackOverridden("claude", {})).toBe(false);
+  });
+
+  it("hides the Cursor Session Cookie fallback only when a cookie is set in the preferences", () => {
+    expect(isFallbackOverridden("cursor", { cursorCookie: "cookie-pref" })).toBe(true);
+    expect(isFallbackOverridden("cursor", { claudeSessionKey: "sk-ant-pref" })).toBe(false);
+    expect(isFallbackOverridden("cursor", {})).toBe(false);
+  });
+
+  it("never hides a fallback for a provider that has none", () => {
+    const preferences: Settings = {
+      claudeSessionKey: "sk-ant-pref",
+      cursorCookie: "cookie-pref",
+      openrouterApiKey: "sk-or",
+    };
+
+    expect(isFallbackOverridden("codex", preferences)).toBe(false);
+    expect(isFallbackOverridden("openrouter", preferences)).toBe(false);
   });
 });

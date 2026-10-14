@@ -29,6 +29,7 @@ import {
   connectLocal,
   ConnectOutcome,
   isConnectOverridden,
+  isFallbackOverridden,
   LocalConnectMethod,
   LoginCheck,
   loginCheckFromError,
@@ -245,6 +246,8 @@ interface ProviderItemProps {
   gitHubSignedIn?: boolean;
   // Hides Connect when it would have no effect, such as Connect GitHub or an API key with one set in the preferences.
   connectHidden?: boolean;
+  // Hides the fallback action (a session key or cookie) while the preference for the same value is set.
+  fallbackHidden?: boolean;
   onRefresh: () => void;
   onConnect: () => void;
   onConnected: (connections: Connections) => void;
@@ -261,6 +264,7 @@ function ProviderItem({
   connected,
   gitHubSignedIn,
   connectHidden,
+  fallbackHidden,
   onRefresh,
   onConnect,
   onConnected,
@@ -307,7 +311,7 @@ function ProviderItem({
   if (!connectHidden) {
     connectActions.push(connectAction);
     const fallback = fallbackAction(provider, settings, onConnected);
-    if (fallback) {
+    if (fallback && !fallbackHidden) {
       connectActions.push(fallback);
     }
   }
@@ -358,6 +362,20 @@ function ProviderItem({
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+// The settings a Connect verifies with. Only the login it signs in to counts. For Claude that is Claude Code's login, so a
+// working claude.ai session key can't make a broken one look fine. For Cursor it is the app's login, so a saved cookie
+// can't make a missing one look fine.
+function verifySettings(method: LocalConnectMethod, settings: Settings): Settings {
+  switch (method.kind) {
+    case "claude":
+      return { ...settings, claudeSessionKey: undefined };
+    case "cursor":
+      return { ...settings, cursorCookie: undefined };
+    default:
+      return settings;
+  }
 }
 
 // Whether the provider's saved login works, as Connect checks it. A success is "ok". See loginCheckFromError for the rest.
@@ -429,9 +447,8 @@ export default function Command() {
     return () => controller.abort();
   }, []);
 
-  // The providers whose Connect is running now. A second Connect for one of them is refused.
-  const connectingRef = useRef(new Set<ProviderId>());
-  // The AbortController of each running Connect. Disconnect and the Keychain denial stop a Connect through it. The number
+  // The Connect running for each provider, with its AbortController. Disconnect and the Keychain denial stop a Connect
+  // through that. An entry whose controller has aborted is no longer running, so a new Connect may replace it. The number
   // is the last refresh started before that Connect, which onKeychainDenied uses.
   const connectAbortsRef = useRef(new Map<ProviderId, { controller: AbortController; refreshesBefore: number }>());
 
@@ -445,14 +462,16 @@ export default function Command() {
   // macOS refused the Keychain read during a refresh. The setting is turned off so later refreshes don't ask again, and
   // choosing Connect turns it on again. A Claude Connect already running is stopped when this refresh started before it:
   // the refresh used the setting from before, so turning the setting off now would undo the Connect's own consent. A
-  // refresh that started after the Connect is about the Connect's read, which the Connect handles itself.
+  // refresh that started after the Connect is about the Connect's read, so the Connect owns the consent and nothing is
+  // saved here.
   const onKeychainDenied = useCallback(
     (request: number) => {
-      void saveConnections({ claudeKeychain: false }).then(updateConnections, () => undefined);
       const claudeConnect = connectAbortsRef.current.get("claude");
-      if (claudeConnect && request <= claudeConnect.refreshesBefore) {
-        claudeConnect.controller.abort();
+      if (claudeConnect && request > claudeConnect.refreshesBefore) {
+        return;
       }
+      void saveConnections({ claudeKeychain: false }).then(updateConnections, () => undefined);
+      claudeConnect?.controller.abort();
     },
     [updateConnections],
   );
@@ -517,13 +536,7 @@ export default function Command() {
         toast.message = message;
       },
       save: async (patch) => updateConnections(await saveConnections(patch)),
-      // Only the login this Connect signs in to is checked. For Claude that is Claude Code's own login, so a working
-      // claude.ai session key can't make a broken Claude Code login look fine.
-      verify: () =>
-        checkLogin(
-          provider,
-          method.kind === "claude" ? { ...currentSettings(), claudeSessionKey: undefined } : currentSettings(),
-        ),
+      verify: () => checkLogin(provider, verifySettings(method, currentSettings())),
       signal,
     }).catch((error: unknown): ConnectOutcome => ({
       kind: "failed",
@@ -592,15 +605,17 @@ export default function Command() {
   }
 
   // Runs the Connect action for a provider. API key providers never get here, since their action opens a form instead.
-  // A second Connect for a provider that is still connecting is refused, so two sign-ins never run at once.
+  // A second Connect for a provider that is still connecting is refused, so two sign-ins never run at once. A Connect
+  // that was stopped no longer counts as running, so a new one replaces it.
   async function connect(provider: Provider): Promise<void> {
-    if (connectingRef.current.has(provider.id)) {
+    const running = connectAbortsRef.current.get(provider.id);
+    if (running && !running.controller.signal.aborted) {
       await showToast({ title: `Already connecting ${provider.name}` });
       return;
     }
-    connectingRef.current.add(provider.id);
     const controller = new AbortController();
-    connectAbortsRef.current.set(provider.id, { controller, refreshesBefore: latestRequest() });
+    const entry = { controller, refreshesBefore: latestRequest() };
+    connectAbortsRef.current.set(provider.id, entry);
     const signal = AbortSignal.any([controller.signal, ...(closeRef.current ? [closeRef.current.signal] : [])]);
     try {
       const method = provider.connect;
@@ -621,8 +636,10 @@ export default function Command() {
           return;
       }
     } finally {
-      connectingRef.current.delete(provider.id);
-      connectAbortsRef.current.delete(provider.id);
+      // A stopped Connect can still be finishing when its replacement starts, so it only removes its own entry.
+      if (connectAbortsRef.current.get(provider.id) === entry) {
+        connectAbortsRef.current.delete(provider.id);
+      }
     }
   }
 
@@ -664,6 +681,7 @@ export default function Command() {
         connected={provider.forget.some((key) => connections?.[key] !== undefined)}
         gitHubSignedIn={provider.id === "copilot" && !hasPreferenceToken ? gitHubToken !== undefined : undefined}
         connectHidden={isConnectOverridden(provider.connect, preferenceSettings)}
+        fallbackHidden={isFallbackOverridden(provider.id, preferenceSettings)}
         onRefresh={() => refreshWith()}
         onConnect={() => void connect(provider)}
         onConnected={(next) => {

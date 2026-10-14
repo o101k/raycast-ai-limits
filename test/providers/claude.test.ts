@@ -464,6 +464,33 @@ describe("fetchClaudeUsage with the claude.ai session key", () => {
     expect(JSON.stringify(error)).not.toContain(SESSION_KEY);
   });
 
+  it("names the Claude Session Key preference in the hint when the session key came from there", async () => {
+    const deps = fakeDeps({
+      routes: sessionRoutes({ organizations: { error: "unauthorized" }, organizationsStatus: 401 }),
+    });
+
+    const error = await fetchClaudeUsage(deps, { ...WITH_SESSION, claudeSessionKeySource: "preference" }).catch(
+      (caught: unknown) => caught,
+    );
+
+    expect(error).toMatchObject({
+      kind: "auth",
+      hint: "Paste a fresh sessionKey cookie into the Claude Session Key preference",
+    });
+  });
+
+  it("keeps the Use Claude Session Key hint when the session key was saved by Connect", async () => {
+    const deps = fakeDeps({
+      routes: sessionRoutes({ organizations: { error: "unauthorized" }, organizationsStatus: 401 }),
+    });
+
+    const error = await fetchClaudeUsage(deps, { ...WITH_SESSION, claudeSessionKeySource: "connection" }).catch(
+      (caught: unknown) => caught,
+    );
+
+    expect(error).toMatchObject({ kind: "auth", hint: expect.stringContaining("Use Claude Session Key") });
+  });
+
   it("throws an auth error when the usage request is rejected", async () => {
     const deps = fakeDeps({ routes: sessionRoutes({ usage: { error: "forbidden" }, usageStatus: 403 }) });
 

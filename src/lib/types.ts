@@ -49,22 +49,33 @@ export interface ProviderUsage {
   keychainDenied?: true;
 }
 
+// Where a credential's value came from. A value typed into the preferences wins over a saved one, so a hint can name the
+// preference when that is what needs fixing, and the action that saved the value otherwise.
+export type ValueSource = "preference" | "connection";
+
 // User settings the providers read. Built from the Raycast preferences by the command, so providers and tests don't
 // depend on the generated Preferences type.
 export interface Settings {
   // The user chose Connect on Claude, which allows reading Claude Code's login from the macOS Keychain.
   claudeKeychain?: boolean;
   claudeSessionKey?: string;
+  claudeSessionKeySource?: ValueSource;
   cursorCookie?: string;
+  cursorCookieSource?: ValueSource;
   githubToken?: string;
   // A GitHub token from signing in inside the extension. Used when githubToken is empty.
   githubOAuthToken?: string;
   openrouterApiKey?: string;
+  openrouterApiKeySource?: ValueSource;
   zaiApiKey?: string;
+  zaiApiKeySource?: ValueSource;
   zaiRegion?: "global" | "china";
   kimiApiKey?: string;
+  kimiApiKeySource?: ValueSource;
   deepseekApiKey?: string;
+  deepseekApiKeySource?: ValueSource;
   moonshotApiKey?: string;
+  moonshotApiKeySource?: ValueSource;
   moonshotRegion?: "global" | "china";
 }
 

@@ -28,6 +28,9 @@ const SIGN_IN_HINT =
 const COOKIE_AUTH_HINT =
   "Choose Use Cursor Session Cookie from this item's actions and paste a fresh WorkosCursorSessionToken cookie from " +
   'cursor.com, or update the "Cursor Session Cookie" preference';
+// Used when the cookie comes from the preference. The fallback action is hidden then, so the hint names the preference.
+const COOKIE_PREFERENCE_HINT =
+  'Paste a fresh WorkosCursorSessionToken cookie from cursor.com into the "Cursor Session Cookie" preference';
 const APP_AUTH_HINT = "Open Cursor to refresh its login";
 
 interface CursorSession {
@@ -71,7 +74,8 @@ export async function fetchCursorUsage(deps: Deps, settings: Settings): Promise<
 async function resolveSession(deps: Deps, settings: Settings): Promise<CursorSession> {
   const manual = extractManualCookie(settings.cursorCookie);
   if (manual) {
-    return { cookie: manual, source: "Cursor session cookie", authHint: COOKIE_AUTH_HINT };
+    const authHint = settings.cursorCookieSource === "preference" ? COOKIE_PREFERENCE_HINT : COOKIE_AUTH_HINT;
+    return { cookie: manual, source: "Cursor session cookie", authHint };
   }
   return { cookie: await appSessionCookie(deps), source: "Cursor app", authHint: APP_AUTH_HINT };
 }

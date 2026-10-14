@@ -62,6 +62,14 @@ describe("fetchMoonshotUsage", () => {
     }
   });
 
+  it("names the preference in the auth hint when the key came from there, since Connect is hidden", async () => {
+    const deps = fakeDeps({ routes: [{ prefix: GLOBAL_URL, respond: { status: 401, body: {} } }] });
+    const error = await fetchMoonshotUsage(deps, { ...settings, moonshotApiKeySource: "preference" }).catch(
+      (e: unknown) => e,
+    );
+    expect((error as ProviderError).hint).toBe("Check the Moonshot API key and region in the extension preferences");
+  });
+
   it("throws auth with the preferences hint on a 401", async () => {
     const deps = fakeDeps({ routes: [{ prefix: GLOBAL_URL, respond: { status: 401, body: {} } }] });
     const error = await fetchMoonshotUsage(deps, settings).catch((e: unknown) => e);
