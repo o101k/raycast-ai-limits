@@ -11,7 +11,6 @@ import {
   readCursorLogin,
   readGeminiLogin,
   resolveUserPath,
-  runSignIn,
   waitFor,
 } from "./sign-in";
 
@@ -41,10 +40,13 @@ export type ConnectMethod =
 export type LocalConnectMethod = Extract<ConnectMethod, { kind: "claude" | "codex" | "gemini" | "cursor" }>;
 
 export interface ConnectUi {
-  // Shows what Connect is doing now, such as "Finish signing in in your browser".
+  // Shows what Connect is doing now, such as "Finish signing in in Terminal".
   progress(title: string, message?: string): void;
   // Stores credentials the extension keeps itself (LocalStorage in the real UI).
   save(patch: Partial<Connections>): Promise<void>;
+  // Fetches this provider's usage with the latest saved connections. True when it works, false when the login is
+  // missing or rejected.
+  verify(): Promise<boolean>;
   // Aborted when the user leaves the command, which stops any waiting.
   signal?: AbortSignal;
   // Replaces the wait between checks in tests. The real UI leaves it out.
@@ -54,50 +56,42 @@ export interface ConnectUi {
 export type ConnectOutcome =
   { kind: "connected" } | { kind: "failed"; title: string; message?: string; help?: { title: string; url: string } };
 
-// Gemini and Cursor finish signing in outside the extension, so the login is checked every few seconds for up to 10
-// minutes.
-const POLL_INTERVAL_MS = 2_000;
+// The sign-in runs outside Raycast (in Terminal, or in the Cursor app), so the login is checked every few seconds
+// for up to 10 minutes.
+const POLL_INTERVAL_MS = 3_000;
 const POLL_TIMEOUT_MS = 10 * 60_000;
 const GEMINI_INSTALL_URL = "https://github.com/google-gemini/gemini-cli";
 const CURSOR_DOWNLOAD_URL = "https://cursor.com/download";
 
 const CONNECTED: ConnectOutcome = { kind: "connected" };
+// Closing the command stops the wait, but the sign-in itself keeps going in Terminal or the app.
+const STOPPED: ConnectOutcome = {
+  kind: "failed",
+  title: "Connect stopped",
+  message: "Finish signing in, then refresh",
+};
 
-// `relogin` is set when Connect's saved login was rejected (the failure kind "auth"). An existing login then doesn't
-// count: the sign-in runs anyway, and only a login that changed is connected, since the rejected one is still on disk.
-export async function connectLocal(
-  deps: Deps,
-  method: LocalConnectMethod,
-  ui: ConnectUi,
-  options: { relogin: boolean } = { relogin: false },
-): Promise<ConnectOutcome> {
+// Each sign-in starts with the login that is already there. When it works (ui.verify), nothing is run. Otherwise the
+// sign-in runs and the login is polled until a new one appears.
+export async function connectLocal(deps: Deps, method: LocalConnectMethod, ui: ConnectUi): Promise<ConnectOutcome> {
   switch (method.kind) {
     case "claude":
-      return connectClaude(deps, ui, options.relogin);
+      return connectClaude(deps, ui);
     case "codex":
-      return connectCodex(deps, ui, options.relogin);
+      return connectCodex(deps, ui);
     case "gemini":
-      return connectGemini(deps, ui, options.relogin);
+      return connectGemini(deps, ui);
     case "cursor":
-      return connectCursor(deps, ui, options.relogin);
+      return connectCursor(deps, ui);
   }
 }
 
 // Clicking Connect is the consent to read Claude Code's login, so the setting is saved before anything is read.
-async function connectClaude(deps: Deps, ui: ConnectUi, relogin: boolean): Promise<ConnectOutcome> {
+async function connectClaude(deps: Deps, ui: ConnectUi): Promise<ConnectOutcome> {
   await ui.save({ claudeKeychain: true });
-
-  if (deps.platform !== "darwin") {
-    const before = await readClaudeCredentials(deps);
-    if (!relogin && before !== null) {
-      return CONNECTED;
-    }
-    return signInClaude(deps, ui, relogin, before, () => readClaudeCredentials(deps));
-  }
-
-  const service = claudeKeychainService(deps.env.CLAUDE_CONFIG_DIR, deps.homedir);
   ui.progress("Connecting Claude Code", "If macOS asks for access to Claude Code's login, choose Always Allow");
-  const read = await readKeychainPassword(deps, service);
+
+  const read = await readKeychainPassword(deps, claudeKeychainService(deps.env.CLAUDE_CONFIG_DIR, deps.homedir));
   if (read.kind === "denied") {
     // Turning the setting back off stops later refreshes from asking macOS again. Choosing Connect turns it on again.
     await ui.save({ claudeKeychain: false });
@@ -107,25 +101,20 @@ async function connectClaude(deps: Deps, ui: ConnectUi, relogin: boolean): Promi
       message: "Choose Connect again and click Always Allow",
     };
   }
-  const before = read.kind === "found" ? read.text : null;
-  if (!relogin && before !== null) {
+  // The Keychain item is the login when there is one. Otherwise the credentials file is, as claude.ts reads it.
+  const before = read.kind === "found" ? read.text : await readClaudeCredentials(deps);
+  if (before !== null && (await ui.verify())) {
     return CONNECTED;
   }
-  return signInClaude(deps, ui, relogin, before, () => readClaudeKeychainLogin(deps, service));
+  return signInClaude(deps, ui, before);
 }
 
-// Runs `claude auth login`, then reads the login again. `before` is the login as it was before the sign-in, and
-// `readLogin` reads the Keychain on macOS and the credentials file elsewhere.
-async function signInClaude(
-  deps: Deps,
-  ui: ConnectUi,
-  relogin: boolean,
-  before: string | null,
-  readLogin: () => Promise<string | null>,
-): Promise<ConnectOutcome> {
-  const path = await resolveUserPath(deps);
-  const executable = await findExecutable(deps, CLI_SIGN_IN.claude.name, path);
+async function signInClaude(deps: Deps, ui: ConnectUi, before: string | null): Promise<ConnectOutcome> {
+  const executable = await findExecutable(deps, CLI_SIGN_IN.claude.name, await resolveUserPath(deps));
   if (!executable) {
+    // Connect saved the Keychain setting above, but there is nothing to read without Claude Code. It is turned back off
+    // so the item doesn't show Disconnect for nothing.
+    await ui.save({ claudeKeychain: false });
     return {
       kind: "failed",
       title: "Claude Code isn't installed",
@@ -133,25 +122,26 @@ async function signInClaude(
       help: { title: "Install Claude Code", url: CLI_SIGN_IN.claude.installUrl },
     };
   }
-
-  ui.progress("Finish signing in in your browser", "Claude Code opened its sign-in page");
-  const result = await runSignIn(deps, { executable, args: CLI_SIGN_IN.claude.args }, path, ui.signal);
-  if (!result.ok) {
-    return { kind: "failed", title: "Claude Code sign-in didn't finish", message: result.message };
-  }
-  if (isNewLogin(before, await readLogin(), relogin)) {
-    return CONNECTED;
-  }
-  return { kind: "failed", title: "Claude Code signed in, but its login wasn't found" };
+  return signInInTerminal(deps, ui, {
+    argv: [executable, ...CLI_SIGN_IN.claude.args],
+    progressTitle: "Finish signing in in Terminal",
+    progressMessage: "Paste the code in Terminal if Claude Code asks for it",
+    check: async () => isNewLogin(before, await readClaudeLogin(deps)),
+    failure: "Claude Code sign-in didn't finish",
+  });
 }
 
-// The Keychain login as text, or null when the item is missing or can't be read.
-async function readClaudeKeychainLogin(deps: Deps, service: string): Promise<string | null> {
-  const read = await readKeychainPassword(deps, service);
-  return read.kind === "found" ? read.text : null;
+// Claude Code's login as text, read the way claude.ts reads it: the Keychain item first, then the credentials file when
+// the item is missing. A denied Keychain read is no login, since the file may be the stale copy.
+async function readClaudeLogin(deps: Deps): Promise<string | null> {
+  const read = await readKeychainPassword(deps, claudeKeychainService(deps.env.CLAUDE_CONFIG_DIR, deps.homedir));
+  if (read.kind === "found") {
+    return read.text;
+  }
+  return read.kind === "denied" ? null : readClaudeCredentials(deps);
 }
 
-// The credentials file Claude Code keeps outside macOS, as text. An unreadable file counts as missing.
+// The credentials file Claude Code keeps outside the Keychain, as text. An unreadable file counts as missing.
 async function readClaudeCredentials(deps: Deps): Promise<string | null> {
   const configDir = deps.env.CLAUDE_CONFIG_DIR || `${deps.homedir}/.claude`;
   try {
@@ -161,20 +151,19 @@ async function readClaudeCredentials(deps: Deps): Promise<string | null> {
   }
 }
 
-// Whether a login read after sign-in counts as signed in. Without relogin, any login does. With relogin, it must differ
-// from the login read before the sign-in, since the rejected one stays in place until the CLI replaces it.
-function isNewLogin(before: string | null, after: string | null, relogin: boolean): boolean {
-  return after !== null && (!relogin || after !== before);
+// Whether a login read after sign-in counts as new. Any login counts when there was none before. Otherwise it must
+// differ from the login read before the sign-in, since the rejected one stays in place until the CLI replaces it.
+function isNewLogin(before: string | null, after: string | null): boolean {
+  return after !== null && (before === null || after !== before);
 }
 
-async function connectCodex(deps: Deps, ui: ConnectUi, relogin: boolean): Promise<ConnectOutcome> {
+async function connectCodex(deps: Deps, ui: ConnectUi): Promise<ConnectOutcome> {
   const before = await readCodexLogin(deps);
-  if (!relogin && before !== null) {
+  if (before !== null && (await ui.verify())) {
     return CONNECTED;
   }
 
-  const path = await resolveUserPath(deps);
-  const executable = await findExecutable(deps, CLI_SIGN_IN.codex.name, path);
+  const executable = await findExecutable(deps, CLI_SIGN_IN.codex.name, await resolveUserPath(deps));
   if (!executable) {
     return {
       kind: "failed",
@@ -182,23 +171,18 @@ async function connectCodex(deps: Deps, ui: ConnectUi, relogin: boolean): Promis
       help: { title: "Install Codex CLI", url: CLI_SIGN_IN.codex.installUrl },
     };
   }
-
-  ui.progress("Finish signing in in your browser", "Codex opened its sign-in page");
-  const result = await runSignIn(deps, { executable, args: CLI_SIGN_IN.codex.args }, path, ui.signal);
-  // The login file is the real test, so it is checked even when the CLI exited with an error.
-  if (isNewLogin(before, await readCodexLogin(deps), relogin)) {
-    return CONNECTED;
-  }
-  return {
-    kind: "failed",
-    title: "Codex sign-in didn't finish",
-    message: result.ok ? undefined : result.message,
-  };
+  return signInInTerminal(deps, ui, {
+    argv: [executable, ...CLI_SIGN_IN.codex.args],
+    progressTitle: "Finish signing in in Terminal",
+    progressMessage: "Codex is waiting for its sign-in to finish",
+    check: async () => isNewLogin(before, await readCodexLogin(deps)),
+    failure: "Codex sign-in didn't finish",
+  });
 }
 
-async function connectGemini(deps: Deps, ui: ConnectUi, relogin: boolean): Promise<ConnectOutcome> {
+async function connectGemini(deps: Deps, ui: ConnectUi): Promise<ConnectOutcome> {
   const before = await readGeminiLogin(deps);
-  if (!relogin && before !== null) {
+  if (before !== null && (await ui.verify())) {
     return CONNECTED;
   }
 
@@ -210,29 +194,22 @@ async function connectGemini(deps: Deps, ui: ConnectUi, relogin: boolean): Promi
       help: { title: "Install Gemini CLI", url: GEMINI_INSTALL_URL },
     };
   }
-
-  // Gemini signs in through its own interactive screen, so it runs in Terminal, whose shell has the user's PATH.
-  try {
-    await openInTerminal(deps, "gemini");
-  } catch (error) {
-    return {
-      kind: "failed",
-      title: "Couldn't open Terminal",
-      message: error instanceof Error ? error.message : String(error),
-    };
-  }
-  ui.progress("Sign in to Gemini CLI in Terminal", "Choose Sign in with Google, then come back");
-  return waitForLogin(
-    deps,
-    ui,
-    async () => isNewLogin(before, await readGeminiLogin(deps), relogin),
-    "Gemini CLI sign-in didn't finish",
-  );
+  // Gemini signs in through its own interactive screen, so it runs in Terminal, like Claude and Codex.
+  return signInInTerminal(deps, ui, {
+    argv: [executable],
+    progressTitle: "Sign in to Gemini CLI in Terminal",
+    progressMessage: "Choose Sign in with Google, then come back",
+    check: async () => isNewLogin(before, await readGeminiLogin(deps)),
+    failure: "Gemini CLI sign-in didn't finish",
+  });
 }
 
-async function connectCursor(deps: Deps, ui: ConnectUi, relogin: boolean): Promise<ConnectOutcome> {
+async function connectCursor(deps: Deps, ui: ConnectUi): Promise<ConnectOutcome> {
+  // Connect Cursor means the app's login. A cookie saved as a fallback is used before the app's login, so it is cleared
+  // first, and the check below then looks at the app.
+  await ui.save({ cursorCookie: "" });
   const before = await readCursorLogin(deps);
-  if (!relogin && before !== null) {
+  if (before !== null && (await ui.verify())) {
     return CONNECTED;
   }
 
@@ -247,17 +224,44 @@ async function connectCursor(deps: Deps, ui: ConnectUi, relogin: boolean): Promi
   return waitForLogin(
     deps,
     ui,
-    async () => isNewLogin(before, await readCursorLogin(deps), relogin),
+    async () => isNewLogin(before, await readCursorLogin(deps)),
     "Cursor sign-in didn't finish",
   );
 }
 
-// Polls until the login appears. The clock comes from deps, so a test can move it forward.
+// Opens Terminal with a CLI's sign-in, then waits for its login. The sign-in keeps running in Terminal after this
+// returns, so it isn't stopped when the wait gives up.
+async function signInInTerminal(
+  deps: Deps,
+  ui: ConnectUi,
+  options: {
+    argv: string[];
+    progressTitle: string;
+    progressMessage: string;
+    check: () => Promise<boolean>;
+    failure: string;
+  },
+): Promise<ConnectOutcome> {
+  try {
+    await openInTerminal(deps, options.argv);
+  } catch (error) {
+    return {
+      kind: "failed",
+      title: "Couldn't open Terminal",
+      message: error instanceof Error ? error.message : String(error),
+    };
+  }
+  ui.progress(options.progressTitle, options.progressMessage);
+  return waitForLogin(deps, ui, options.check, options.failure);
+}
+
+// Polls until the login is new. The clock comes from deps, so a test can move it forward. When the wait ends because
+// the command closed, the result says so, since the sign-in may still be running.
 async function waitForLogin(
   deps: Deps,
   ui: ConnectUi,
   check: () => Promise<boolean>,
-  title: string,
+  failure: string,
 ): Promise<ConnectOutcome> {
   const signedIn = await waitFor(check, {
     intervalMs: POLL_INTERVAL_MS,
@@ -266,5 +270,8 @@ async function waitForLogin(
     sleep: ui.sleep,
     signal: ui.signal,
   });
-  return signedIn ? CONNECTED : { kind: "failed", title };
+  if (signedIn) {
+    return CONNECTED;
+  }
+  return ui.signal?.aborted ? STOPPED : { kind: "failed", title: failure };
 }

@@ -20,7 +20,9 @@ export interface Deps {
   // Runs a read-only query with /usr/bin/sqlite3 and returns its stdout. Throws when the database can't be opened.
   sqlite(dbPath: string, sql: string): Promise<string>;
   // Runs a program (absolute path, no shell) and resolves with its exit code and output. A non-zero exit resolves too;
-  // only a program that can't be started, or one that runs past `timeoutMs`, rejects.
+  // only a program that can't be started, or one that runs past `timeoutMs`, rejects. The program is killed with
+  // SIGKILL at the timeout, since an interactive shell ignores SIGTERM. Its stdin is closed at once, so a program that
+  // waits for input (such as a shell rc file that asks a question) ends instead of hanging.
   run(file: string, args: string[], options?: RunOptions): Promise<RunResult>;
   // Whether the path is a file this process may execute.
   isExecutable(path: string): Promise<boolean>;
@@ -31,12 +33,11 @@ export interface Deps {
 }
 
 export interface RunOptions {
-  // Defaults to 10 seconds. Sign-in commands that wait for the browser pass a longer one.
+  // Defaults to 10 seconds. A command that waits for the user, such as osascript's first Automation prompt, passes a
+  // longer one.
   timeoutMs?: number;
   // Replaces the environment of the child. Defaults to this process's environment.
   env?: Record<string, string | undefined>;
-  // Stops the child when aborted, so a sign-in that waits for the browser doesn't outlive the command.
-  signal?: AbortSignal;
 }
 
 export interface RunResult {
@@ -75,14 +76,14 @@ export function realDeps(): Deps {
     },
     run: (file, args, options) =>
       new Promise((resolve, reject) => {
-        execFile(
+        const child = execFile(
           file,
           args,
           {
             timeout: options?.timeoutMs ?? 10_000,
             env: options?.env ?? process.env,
             maxBuffer: 1024 * 1024,
-            signal: options?.signal,
+            killSignal: "SIGKILL",
           },
           (error, stdout, stderr) => {
             if (error && (typeof error.code !== "number" || error.killed)) {
@@ -92,6 +93,7 @@ export function realDeps(): Deps {
             resolve({ exitCode: typeof error?.code === "number" ? error.code : 0, stdout, stderr });
           },
         );
+        child.stdin?.end();
       }),
     isExecutable: async (path) => {
       try {

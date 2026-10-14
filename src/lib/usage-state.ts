@@ -96,7 +96,7 @@ export function sections(
 
 export function toFailure(error: unknown): Failure {
   if (error instanceof ProviderError) {
-    return { kind: error.kind, message: error.message, hint: error.hint };
+    return { kind: error.kind, message: error.message, hint: error.hint, code: error.code };
   }
   return { kind: "http", message: error instanceof Error ? error.message : String(error) };
 }

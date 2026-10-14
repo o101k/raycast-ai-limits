@@ -75,6 +75,10 @@ export type ProviderErrorKind =
   // The provider answered in a shape we don't understand.
   | "parse";
 
+// Set on the errors the UI acts on beyond showing them. "keychain-denied" means macOS refused the Keychain read, so the
+// UI turns the Keychain setting off instead of asking macOS again on every refresh.
+export type ProviderErrorCode = "keychain-denied";
+
 export class ProviderError extends Error {
   constructor(
     readonly kind: ProviderErrorKind,
@@ -82,6 +86,7 @@ export class ProviderError extends Error {
     readonly hint?: string,
     // The HTTP status, when the error came from a provider's answer.
     readonly status?: number,
+    readonly code?: ProviderErrorCode,
   ) {
     super(message);
     this.name = "ProviderError";

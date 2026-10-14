@@ -46,7 +46,7 @@ import {
   toFailure,
   Transition,
 } from "./lib/usage-state";
-import { ProviderId, Settings } from "./lib/types";
+import { ProviderError, ProviderId, Settings } from "./lib/types";
 
 // The last successful result of every provider is kept, so reopening the command shows numbers at once while the
 // refresh runs. The transitions in usage-state.ts decide what is kept.
@@ -74,7 +74,7 @@ function writeCache(usage: Cached) {
 
 // The hook only holds the latest transition and renders it. Every change goes through the pure functions in
 // usage-state.ts, which are tested.
-function useUsage() {
+function useUsage(onKeychainDenied: () => void) {
   const [initialCache] = useState(readCache);
   const storeRef = useRef<Transition>({ states: initialStates(PROVIDER_IDS, initialCache), cached: initialCache });
   const [states, setStates] = useState(storeRef.current.states);
@@ -115,14 +115,18 @@ function useUsage() {
             (error: unknown) => {
               if (requestsRef.current[provider.id] === request) {
                 const { states: current, cached } = storeRef.current;
-                commit(applyFailure(current, cached, provider.id, toFailure(error)));
+                const failure = toFailure(error);
+                commit(applyFailure(current, cached, provider.id, failure));
+                if (failure.code === "keychain-denied") {
+                  onKeychainDenied();
+                }
               }
             },
           ),
         ),
       );
     },
-    [commit],
+    [commit, onKeychainDenied],
   );
 
   return { states, refresh };
@@ -225,6 +229,8 @@ interface ProviderItemProps {
   connected: boolean;
   // Set only for Copilot when no token is in the preferences. undefined means the sign-in actions don't apply.
   gitHubSignedIn?: boolean;
+  // Hides Connect when it would have no effect, such as Connect GitHub with a token set in the preferences.
+  connectHidden?: boolean;
   onRefresh: () => void;
   onConnect: () => void;
   onConnected: (connections: Connections) => void;
@@ -240,6 +246,7 @@ function ProviderItem({
   settings,
   connected,
   gitHubSignedIn,
+  connectHidden,
   onRefresh,
   onConnect,
   onConnected,
@@ -282,10 +289,13 @@ function ProviderItem({
     ) : (
       <Action key="connect" title={connectTitle(provider)} icon={Icon.Plug} onAction={onConnect} />
     );
-  const connectActions: JSX.Element[] = [connectAction];
-  const fallback = fallbackAction(provider, settings, onConnected);
-  if (fallback) {
-    connectActions.push(fallback);
+  const connectActions: JSX.Element[] = [];
+  if (!connectHidden) {
+    connectActions.push(connectAction);
+    const fallback = fallbackAction(provider, settings, onConnected);
+    if (fallback) {
+      connectActions.push(fallback);
+    }
   }
   // Connect goes first when there is nothing to show, or when the saved login was rejected, since that is what the user
   // needs next. Otherwise it sits after Copy Usage, so Enter still refreshes a working provider.
@@ -340,8 +350,15 @@ export default function Command() {
   const preferences = getPreferenceValues<Preferences.Usage>();
   const mode: DisplayMode = preferences.displayMode;
 
-  // The GitHub token from signing in is read before the first fetch, so Copilot's first request already has it.
+  // The GitHub token and the saved connections are kept in refs as well as in state. Connect can run for minutes, and
+  // the callbacks it uses read the refs (see currentSettings), so they never refresh with values from an older render.
   const [gitHubToken, setGitHubToken] = useState<string>();
+  const gitHubTokenRef = useRef<string | undefined>(undefined);
+  const updateGitHubToken = useCallback((token: string | undefined) => {
+    gitHubTokenRef.current = token;
+    setGitHubToken(token);
+  }, []);
+  // The GitHub token from signing in is read before the first fetch, so Copilot's first request already has it.
   const [gitHubTokenChecked, setGitHubTokenChecked] = useState(false);
   useEffect(() => {
     let active = true;
@@ -349,31 +366,36 @@ export default function Command() {
       .catch(() => undefined)
       .then((token) => {
         if (active) {
-          setGitHubToken(token);
+          updateGitHubToken(token);
           setGitHubTokenChecked(true);
         }
       });
     return () => {
       active = false;
     };
-  }, []);
+  }, [updateGitHubToken]);
 
   // The connections Connect saved are read before the first fetch as well, so a provider connected earlier is fetched
   // with its key. A failed read counts as none saved, which only means the user connects again.
   const [connections, setConnections] = useState<Connections>();
+  const connectionsRef = useRef<Connections | undefined>(undefined);
+  const updateConnections = useCallback((next: Connections) => {
+    connectionsRef.current = next;
+    setConnections(next);
+  }, []);
   useEffect(() => {
     let active = true;
     loadConnections()
       .catch((): Connections => ({}))
       .then((saved) => {
         if (active) {
-          setConnections(saved);
+          updateConnections(saved);
         }
       });
     return () => {
       active = false;
     };
-  }, []);
+  }, [updateConnections]);
 
   // A Connect still waiting for a browser or a CLI is stopped when the command closes, so it doesn't outlive the view.
   const closeRef = useRef<AbortController | undefined>(undefined);
@@ -383,8 +405,22 @@ export default function Command() {
     return () => controller.abort();
   }, []);
 
+  // The providers whose Connect is running now. A second Connect for one of them is refused.
+  const connectingRef = useRef(new Set<ProviderId>());
+
   const settings = toSettings(preferences, connections, gitHubToken);
-  const { states, refresh } = useUsage();
+  // The settings from the latest GitHub token and connections. Connect and the refreshes after it use these, not the
+  // settings of the render they were started in.
+  function currentSettings(): Settings {
+    return toSettings(preferences, connectionsRef.current, gitHubTokenRef.current);
+  }
+
+  // macOS refused the Keychain read during a refresh. The setting is turned off so later refreshes don't ask again, and
+  // choosing Connect turns it on again.
+  const onKeychainDenied = useCallback(() => {
+    void saveConnections({ claudeKeychain: false }).then(updateConnections, () => undefined);
+  }, [updateConnections]);
+  const { states, refresh } = useUsage(onKeychainDenied);
 
   // The first refresh waits for the GitHub token and the saved connections, and then runs once.
   const startedRef = useRef(false);
@@ -396,16 +432,22 @@ export default function Command() {
     }
   }, [ready, refresh, settings]);
 
-  // Refreshes every provider with the given connections. A forced refresh, so a new or removed login shows at once.
-  function refreshWith(next: Connections) {
-    return refresh(toSettings(preferences, next, gitHubToken), { force: true });
+  // Refreshes every provider with the latest token and connections. A forced refresh, so a new or removed login shows
+  // at once.
+  function refreshWith() {
+    return refresh(currentSettings(), { force: true });
   }
 
-  async function signIn() {
+  // Signs in with GitHub. `signOutFirst` removes the stored token before the sign-in, because the sign-in hands back
+  // the stored token without asking when there is one.
+  async function signIn(signOutFirst: boolean) {
     try {
-      const token = await signInWithGitHub();
-      setGitHubToken(token);
-      await refresh(toSettings(preferences, connections, token), { force: true });
+      if (signOutFirst) {
+        await signOutOfGitHub();
+        updateGitHubToken(undefined);
+      }
+      updateGitHubToken(await signInWithGitHub());
+      await refreshWith();
     } catch (error) {
       await showToast({
         style: Toast.Style.Failure,
@@ -418,8 +460,8 @@ export default function Command() {
   async function signOut() {
     try {
       await signOutOfGitHub();
-      setGitHubToken(undefined);
-      await refresh(toSettings(preferences, connections, undefined), { force: true });
+      updateGitHubToken(undefined);
+      await refreshWith();
     } catch (error) {
       await showToast({
         style: Toast.Style.Failure,
@@ -429,24 +471,29 @@ export default function Command() {
     }
   }
 
+  // Whether the provider's saved login works. A login that the provider rejects or can't find is not working. Any other
+  // error, such as no network, says nothing about the login, so it counts as working.
+  async function loginWorks(provider: Provider): Promise<boolean> {
+    try {
+      await provider.fetchUsage(realDeps(), currentSettings());
+      return true;
+    } catch (error) {
+      return !(error instanceof ProviderError && (error.kind === "auth" || error.kind === "not-connected"));
+    }
+  }
+
   // Claude, Codex, Cursor and Gemini sign in with their own CLI or app on this Mac. The toast shows what that is doing.
   async function connectTool(provider: Provider, method: LocalConnectMethod) {
     const toast = await showToast({ style: Toast.Style.Animated, title: `Connecting ${provider.name}` });
-    // A rejected login is still on disk, so Connect signs in again instead of counting the login that is already there.
-    const relogin = states[provider.id].failure?.kind === "auth";
-    const outcome = await connectLocal(
-      realDeps(),
-      method,
-      {
-        progress: (title, message) => {
-          toast.title = title;
-          toast.message = message;
-        },
-        save: async (patch) => setConnections(await saveConnections(patch)),
-        signal: closeRef.current?.signal,
+    const outcome = await connectLocal(realDeps(), method, {
+      progress: (title, message) => {
+        toast.title = title;
+        toast.message = message;
       },
-      { relogin },
-    ).catch((error: unknown): ConnectOutcome => ({
+      save: async (patch) => updateConnections(await saveConnections(patch)),
+      verify: () => loginWorks(provider),
+      signal: closeRef.current?.signal,
+    }).catch((error: unknown): ConnectOutcome => ({
       kind: "failed",
       title: `Could not connect ${provider.name}`,
       message: errorMessage(error),
@@ -457,7 +504,8 @@ export default function Command() {
       toast.title = `${provider.name} connected`;
       toast.message = undefined;
       // The saved connections are read again, so the refresh uses exactly what was stored.
-      await refreshWith(await loadConnections());
+      updateConnections(await loadConnections());
+      await refreshWith();
       return;
     }
     toast.style = Toast.Style.Failure;
@@ -478,11 +526,11 @@ export default function Command() {
     });
     try {
       const next = await saveConnections({ openrouterApiKey: await signInWithOpenRouter(realDeps()) });
-      setConnections(next);
+      updateConnections(next);
       toast.style = Toast.Style.Success;
       toast.title = `${provider.name} connected`;
       toast.message = undefined;
-      await refreshWith(next);
+      await refreshWith();
     } catch (error) {
       toast.style = Toast.Style.Failure;
       toast.title = `Could not connect ${provider.name}`;
@@ -490,24 +538,41 @@ export default function Command() {
     }
   }
 
+  // Connect GitHub signs in again when Copilot rejected the saved token, or the account has no Copilot. Other failures,
+  // such as no network, keep the token, since it may be fine.
+  async function connectGitHub(provider: Provider) {
+    const kind = states[provider.id].failure?.kind;
+    await signIn(kind === "auth" || kind === "not-connected");
+  }
+
   // Runs the Connect action for a provider. API key providers never get here, since their action opens a form instead.
+  // A second Connect for a provider that is still connecting is refused, so two sign-ins never run at once.
   async function connect(provider: Provider): Promise<void> {
-    const method = provider.connect;
-    switch (method.kind) {
-      case "claude":
-      case "codex":
-      case "gemini":
-      case "cursor":
-        await connectTool(provider, method);
-        return;
-      case "github":
-        await signIn();
-        return;
-      case "openrouter":
-        await connectOpenRouter(provider);
-        return;
-      case "api-key":
-        return;
+    if (connectingRef.current.has(provider.id)) {
+      await showToast({ title: `Already connecting ${provider.name}` });
+      return;
+    }
+    connectingRef.current.add(provider.id);
+    try {
+      const method = provider.connect;
+      switch (method.kind) {
+        case "claude":
+        case "codex":
+        case "gemini":
+        case "cursor":
+          await connectTool(provider, method);
+          return;
+        case "github":
+          await connectGitHub(provider);
+          return;
+        case "openrouter":
+          await connectOpenRouter(provider);
+          return;
+        case "api-key":
+          return;
+      }
+    } finally {
+      connectingRef.current.delete(provider.id);
     }
   }
 
@@ -515,8 +580,8 @@ export default function Command() {
   async function disconnect(provider: Provider) {
     try {
       const next = await forgetConnections(provider.forget);
-      setConnections(next);
-      await refreshWith(next);
+      updateConnections(next);
+      await refreshWith();
     } catch (error) {
       await showToast({
         style: Toast.Style.Failure,
@@ -544,11 +609,12 @@ export default function Command() {
         settings={settings}
         connected={provider.forget.some((key) => connections?.[key] !== undefined)}
         gitHubSignedIn={provider.id === "copilot" && !hasPreferenceToken ? gitHubToken !== undefined : undefined}
-        onRefresh={() => refresh(settings, { force: true })}
+        connectHidden={provider.id === "copilot" && hasPreferenceToken}
+        onRefresh={() => refreshWith()}
         onConnect={() => void connect(provider)}
         onConnected={(next) => {
-          setConnections(next);
-          void refreshWith(next);
+          updateConnections(next);
+          void refreshWith();
         }}
         onDisconnect={() => void disconnect(provider)}
         onSignOut={() => void signOut()}

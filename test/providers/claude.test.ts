@@ -611,6 +611,7 @@ describe("fetchClaudeUsage with the Claude Code Keychain login", () => {
       hint: expect.stringContaining("Always Allow"),
     });
     expect((error as ProviderError).hint).toContain("Connect Claude Code");
+    expect((error as ProviderError).code).toBe("keychain-denied");
     // The file is not used even though it holds a login, because it may be the stale copy.
     expect(deps.requests).toEqual([]);
   });

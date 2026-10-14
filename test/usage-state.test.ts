@@ -209,6 +209,23 @@ describe("toFailure", () => {
     });
   });
 
+  it("carries the error code, so the view can act on a denied Keychain read", () => {
+    const error = new ProviderError(
+      "auth",
+      "macOS denied access",
+      "Choose Connect again",
+      undefined,
+      "keychain-denied",
+    );
+
+    expect(toFailure(error)).toEqual({
+      kind: "auth",
+      message: "macOS denied access",
+      hint: "Choose Connect again",
+      code: "keychain-denied",
+    });
+  });
+
   it("turns other errors into an http failure", () => {
     expect(toFailure(new Error("socket hang up"))).toEqual({ kind: "http", message: "socket hang up" });
     expect(toFailure("plain")).toEqual({ kind: "http", message: "plain" });

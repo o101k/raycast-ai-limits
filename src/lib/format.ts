@@ -1,4 +1,4 @@
-import type { Balance, ProviderErrorKind, ProviderUsage, UsageWindow } from "./types";
+import type { Balance, ProviderErrorCode, ProviderErrorKind, ProviderUsage, UsageWindow } from "./types";
 
 // Pure display helpers for the usage view. They take the clock as `now` and never import @raycast/api, so the tests
 // run without Raycast.
@@ -15,6 +15,8 @@ export interface Failure {
   kind: ProviderErrorKind;
   message: string;
   hint?: string;
+  // Carried from the ProviderError, so the view can act on it (see ProviderErrorCode).
+  code?: ProviderErrorCode;
 }
 
 // What the view knows about one provider. `usage` is the last successful result. It can come from the cache, while a

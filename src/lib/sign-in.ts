@@ -1,12 +1,11 @@
-import { basename } from "node:path";
 import { Deps, RunResult } from "./deps";
 import { STATE_DB, TOKEN_QUERY } from "./providers/cursor";
 
 // Connect runs each tool's own sign-in. Nothing here imports Raycast, so the helpers are tested with fakeDeps.
 
-// Sign-ins open the browser and wait for its callback, so they get far longer than the default 10 seconds.
-const SIGN_IN_TIMEOUT_MS = 10 * 60_000;
-const MESSAGE_MAX_LENGTH = 200;
+// The first time, macOS asks whether Raycast may control Terminal, and that answer can take a while.
+const OSASCRIPT = "/usr/bin/osascript";
+const OSASCRIPT_TIMEOUT_MS = 60_000;
 
 // A marker around the PATH, so text an interactive shell prints before it (a banner, a greeting) is ignored.
 const PATH_MARKER = "__AI_LIMITS__";
@@ -24,15 +23,8 @@ const WELL_KNOWN_DIRS = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bi
 // Where the Gemini CLI keeps its login. gemini.ts reads the same file.
 const GEMINI_CREDENTIALS = ".gemini/oauth_creds.json";
 
-export interface SignInCommand {
-  executable: string;
-  // Readonly so a table entry such as CLI_SIGN_IN.claude.args can be passed as it is.
-  args: readonly string[];
-}
-
-export type SignInResult = { ok: true } | { ok: false; reason: "cancelled" | "failed"; message: string };
-
-// The sign-in each CLI runs, and where to get the CLI when it isn't installed. `name` is what findExecutable looks for.
+// The sign-in each CLI runs in Terminal, and where to get the CLI when it isn't installed. `name` is what
+// findExecutable looks for.
 export const CLI_SIGN_IN = {
   claude: { name: "claude", args: ["auth", "login"], installUrl: "https://code.claude.com/docs/en/setup" },
   codex: { name: "codex", args: ["login"], installUrl: "https://developers.openai.com/codex/cli" },
@@ -87,56 +79,39 @@ export async function findExecutable(deps: Deps, name: string, path: string): Pr
   return undefined;
 }
 
-// Runs a CLI's own sign-in and resolves when it exits. PATH goes in the child's environment so that a
-// `#!/usr/bin/env node` script can find node. A run that rejects (it took longer than the timeout, or was killed) is
-// reported as cancelled. When `signal` aborted, the run was stopped on purpose, so the message says so.
-export async function runSignIn(
-  deps: Deps,
-  command: SignInCommand,
-  path: string,
-  signal?: AbortSignal,
-): Promise<SignInResult> {
-  let result: RunResult;
-  try {
-    result = await deps.run(command.executable, [...command.args], {
-      timeoutMs: SIGN_IN_TIMEOUT_MS,
-      env: { ...deps.env, PATH: path },
-      signal,
-    });
-  } catch {
-    if (signal?.aborted) {
-      return { ok: false, reason: "cancelled", message: "Sign-in was cancelled" };
-    }
-    return { ok: false, reason: "cancelled", message: "Sign-in timed out" };
-  }
-  if (result.exitCode === 0) {
-    return { ok: true };
-  }
-
-  // CLIs print their progress first and the error last, so the last line with text is the useful one.
-  const fallback = `${basename(command.executable)} exited with code ${result.exitCode}`;
-  const message = lastLine(result.stderr) ?? lastLine(result.stdout) ?? fallback;
-  return { ok: false, reason: "failed", message: message.slice(0, MESSAGE_MAX_LENGTH) };
-}
-
-function lastLine(text: string): string | undefined {
-  const lines = text
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line !== "");
-  return lines.at(-1);
-}
-
-// Opens Terminal and runs `command` in a new window. Gemini uses this because its sign-in is in its interactive UI, and
-// Terminal's shell has the user's PATH.
-export async function openInTerminal(deps: Deps, command: string): Promise<void> {
+// Opens a new Terminal window and runs argv (the executable first) in it. The sign-in runs in Terminal rather than as
+// a child of Raycast, because Raycast stops a hidden command after a while, and that would end a sign-in still waiting
+// for the browser. Terminal's shell also has the user's environment (CLAUDE_CONFIG_DIR, CODEX_HOME, the PATH from
+// their shell files), and the CLI keeps running after this returns.
+export async function openInTerminal(deps: Deps, argv: string[]): Promise<void> {
+  const command = argv.map(shellQuote).join(" ");
   // Backslashes are escaped first, so the ones added for the quotes aren't escaped again.
   const escaped = command.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
   const script = ['tell application "Terminal"', "activate", `do script "${escaped}"`, "end tell"].join("\n");
-  const result = await deps.run("/usr/bin/osascript", ["-e", script]);
-  if (result.exitCode !== 0) {
-    throw new Error(result.stderr.trim() || `osascript exited with code ${result.exitCode}`);
+
+  let result: RunResult;
+  try {
+    result = await deps.run(OSASCRIPT, ["-e", script], { timeoutMs: OSASCRIPT_TIMEOUT_MS });
+  } catch {
+    // The error from a run that fails would include the script, so the message is written here instead.
+    throw new Error("Couldn't open Terminal (osascript didn't finish)");
   }
+  if (result.exitCode === 0) {
+    return;
+  }
+  // -1743 is the error macOS gives when the Automation permission for Terminal is refused.
+  if (result.stderr.includes("-1743")) {
+    throw new Error(
+      "Raycast isn't allowed to control Terminal. Allow it in System Settings > Privacy & Security > Automation.",
+    );
+  }
+  throw new Error(`Couldn't open Terminal (osascript exit ${result.exitCode})`);
+}
+
+// Quotes one argument for a POSIX shell. Inside single quotes only the single quote is special, so each one is closed,
+// escaped and reopened.
+function shellQuote(arg: string): string {
+  return `'${arg.replace(/'/g, "'\\''")}'`;
 }
 
 // Launches an app by its bundle id. `open` exits non-zero when the app isn't installed, which is reported as false.

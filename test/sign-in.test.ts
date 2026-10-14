@@ -9,7 +9,6 @@ import {
   readCursorLogin,
   readGeminiLogin,
   resolveUserPath,
-  runSignIn,
   waitFor,
 } from "../src/lib/sign-in";
 import { TOKEN_QUERY } from "../src/lib/providers/cursor";
@@ -18,6 +17,7 @@ import { fakeDeps, HOME } from "./fake-deps";
 // The PATH segments added after whatever the login shell (or the fallback) provided, in the order they are appended.
 const APPENDED = `${HOME}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin`;
 const DONE = { exitCode: 0, stdout: "", stderr: "" };
+const OSASCRIPT = "/usr/bin/osascript";
 
 describe("resolveUserPath", () => {
   it("takes the PATH between the markers, so a banner printed before it is ignored", async () => {
@@ -181,116 +181,6 @@ describe("findExecutable", () => {
   });
 });
 
-describe("runSignIn", () => {
-  const COMMAND = { executable: "/opt/homebrew/bin/codex", args: ["login"] };
-
-  it("resolves ok when the CLI exits 0", async () => {
-    const deps = fakeDeps();
-    deps.programs.push({ file: COMMAND.executable, respond: DONE });
-
-    expect(await runSignIn(deps, COMMAND, "/usr/bin")).toEqual({ ok: true });
-  });
-
-  it("runs the CLI with its arguments, a 10 minute timeout, and PATH in a copy of the environment", async () => {
-    const deps = fakeDeps();
-    deps.env.HOME = HOME;
-    deps.env.PATH = "/old/bin";
-    deps.programs.push({ file: COMMAND.executable, respond: DONE });
-
-    await runSignIn(deps, COMMAND, "/new/bin:/usr/bin");
-
-    expect(deps.runCalls).toEqual([
-      {
-        file: COMMAND.executable,
-        args: ["login"],
-        options: { timeoutMs: 600_000, env: { HOME, PATH: "/new/bin:/usr/bin" } },
-      },
-    ]);
-  });
-
-  it("reports the last line of stderr when the CLI fails", async () => {
-    const deps = fakeDeps();
-    deps.programs.push({
-      file: COMMAND.executable,
-      respond: {
-        exitCode: 1,
-        stdout: "Opening browser\n",
-        stderr: "Starting login\nError: the browser was closed\n\n",
-      },
-    });
-
-    expect(await runSignIn(deps, COMMAND, "/usr/bin")).toEqual({
-      ok: false,
-      reason: "failed",
-      message: "Error: the browser was closed",
-    });
-  });
-
-  it("reports the last line of stdout when stderr is empty", async () => {
-    const deps = fakeDeps();
-    deps.programs.push({
-      file: COMMAND.executable,
-      respond: { exitCode: 1, stdout: "Waiting for login\nLogin was not completed\n", stderr: "" },
-    });
-
-    expect(await runSignIn(deps, COMMAND, "/usr/bin")).toMatchObject({ message: "Login was not completed" });
-  });
-
-  it("names the CLI and its exit code when it printed nothing", async () => {
-    const deps = fakeDeps();
-    deps.programs.push({ file: COMMAND.executable, respond: { exitCode: 2, stdout: "", stderr: "  \n" } });
-
-    expect(await runSignIn(deps, COMMAND, "/usr/bin")).toEqual({
-      ok: false,
-      reason: "failed",
-      message: "codex exited with code 2",
-    });
-  });
-
-  it("trims a long message to 200 characters", async () => {
-    const deps = fakeDeps();
-    deps.programs.push({ file: COMMAND.executable, respond: { exitCode: 1, stdout: "", stderr: "x".repeat(300) } });
-
-    const result = await runSignIn(deps, COMMAND, "/usr/bin");
-
-    expect(result).toEqual({ ok: false, reason: "failed", message: "x".repeat(200) });
-  });
-
-  it("reports a run that rejects (timed out or killed) as cancelled", async () => {
-    const deps = fakeDeps();
-    deps.programs.push({ file: COMMAND.executable, respond: () => Promise.reject(new Error("killed")) });
-
-    expect(await runSignIn(deps, COMMAND, "/usr/bin")).toEqual({
-      ok: false,
-      reason: "cancelled",
-      message: "Sign-in timed out",
-    });
-  });
-
-  it("passes the signal to the run, so the CLI is stopped when the command closes", async () => {
-    const deps = fakeDeps();
-    deps.programs.push({ file: COMMAND.executable, respond: DONE });
-    const controller = new AbortController();
-
-    await runSignIn(deps, COMMAND, "/usr/bin", controller.signal);
-
-    expect(deps.runCalls[0].options?.signal).toBe(controller.signal);
-  });
-
-  it("reports a run stopped by the signal as cancelled by the user, not as a timeout", async () => {
-    const deps = fakeDeps();
-    deps.programs.push({ file: COMMAND.executable, respond: DONE });
-    const controller = new AbortController();
-    controller.abort();
-
-    expect(await runSignIn(deps, COMMAND, "/usr/bin", controller.signal)).toEqual({
-      ok: false,
-      reason: "cancelled",
-      message: "Sign-in was cancelled",
-    });
-  });
-});
-
 describe("CLI_SIGN_IN", () => {
   it("has the sign-in command for Claude and Codex", () => {
     expect(CLI_SIGN_IN.claude).toMatchObject({ name: "claude", args: ["auth", "login"] });
@@ -299,38 +189,65 @@ describe("CLI_SIGN_IN", () => {
 });
 
 describe("openInTerminal", () => {
+  // The AppleScript that opens Terminal and runs `command` in it, with the command already escaped.
   const script = (command: string) =>
     ['tell application "Terminal"', "activate", `do script "${command}"`, "end tell"].join("\n");
 
-  it("opens Terminal and runs the command in it", async () => {
+  it("runs the executable in a new Terminal window, with a 60 second timeout for the Automation prompt", async () => {
     const deps = fakeDeps();
-    deps.programs.push({ file: "/usr/bin/osascript", respond: DONE });
+    deps.programs.push({ file: OSASCRIPT, respond: DONE });
 
-    await openInTerminal(deps, "gemini");
+    await openInTerminal(deps, ["/opt/homebrew/bin/gemini"]);
 
-    expect(deps.runCalls).toEqual([{ file: "/usr/bin/osascript", args: ["-e", script("gemini")] }]);
+    expect(deps.runCalls).toEqual([
+      { file: OSASCRIPT, args: ["-e", script("'/opt/homebrew/bin/gemini'")], options: { timeoutMs: 60_000 } },
+    ]);
   });
 
-  it("escapes double quotes and backslashes for AppleScript", async () => {
+  it("quotes each argument for the shell, so a path with a space and a single quote runs as one word", async () => {
     const deps = fakeDeps();
-    deps.programs.push({ file: "/usr/bin/osascript", respond: DONE });
-    const command = String.raw`echo "hi" \ done`;
+    deps.programs.push({ file: OSASCRIPT, respond: DONE });
 
-    await openInTerminal(deps, command);
+    await openInTerminal(deps, ["/Users/Jo Ann/it's/claude", "auth", "login"]);
 
-    expect(deps.runCalls[0].args[1]).toBe(
-      ['tell application "Terminal"', "activate", String.raw`do script "echo \"hi\" \\ done"`, "end tell"].join("\n"),
-    );
+    // The single quote is closed, escaped and reopened, and the backslash that does it is doubled for AppleScript.
+    expect(deps.runCalls[0].args[1]).toBe(script(String.raw`'/Users/Jo Ann/it'\\''s/claude' 'auth' 'login'`));
   });
 
-  it("throws osascript's error when Terminal can't be controlled", async () => {
+  it("escapes double quotes and backslashes for AppleScript, after the shell quoting", async () => {
+    const deps = fakeDeps();
+    deps.programs.push({ file: OSASCRIPT, respond: DONE });
+
+    await openInTerminal(deps, [String.raw`echo "hi" \ done`]);
+
+    expect(deps.runCalls[0].args[1]).toBe(script(String.raw`'echo \"hi\" \\ done'`));
+  });
+
+  it("says Raycast needs permission to control Terminal when osascript reports -1743", async () => {
     const deps = fakeDeps();
     deps.programs.push({
-      file: "/usr/bin/osascript",
+      file: OSASCRIPT,
       respond: { exitCode: 1, stdout: "", stderr: "Not authorized to send Apple events (-1743)\n" },
     });
 
-    await expect(openInTerminal(deps, "gemini")).rejects.toThrow("Not authorized to send Apple events (-1743)");
+    await expect(openInTerminal(deps, ["gemini"])).rejects.toThrow(
+      "Raycast isn't allowed to control Terminal. Allow it in System Settings > Privacy & Security > Automation.",
+    );
+  });
+
+  it("reports any other failure by exit code, without the script or osascript's text", async () => {
+    const deps = fakeDeps();
+    deps.programs.push({ file: OSASCRIPT, respond: { exitCode: 2, stdout: "", stderr: "syntax error near it" } });
+
+    const error = await openInTerminal(deps, ["gemini"]).catch((caught: unknown) => caught);
+
+    expect((error as Error).message).toBe("Couldn't open Terminal (osascript exit 2)");
+  });
+
+  it("reports a run that can't finish without the script in the message", async () => {
+    const error = await openInTerminal(fakeDeps(), ["gemini"]).catch((caught: unknown) => caught);
+
+    expect((error as Error).message).toBe("Couldn't open Terminal (osascript didn't finish)");
   });
 });
 

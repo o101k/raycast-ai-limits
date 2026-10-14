@@ -18,7 +18,9 @@ const SESSION_HINT =
 const KEYCHAIN_DENIED_HINT =
   "Choose Connect Claude Code from this item's actions again.\n" +
   "When macOS asks for access to Claude Code's login, click Always Allow.";
-const KEYCHAIN_NOT_CONNECTED_HINT = "Choose Connect Claude Code from this item's actions to sign in.";
+const KEYCHAIN_NOT_CONNECTED_HINT =
+  "Choose Connect Claude Code from this item's actions to sign in.\n" +
+  "As a last resort, choose Use Claude Session Key from this item's actions instead.";
 const NOT_CONNECTED_HINT =
   "Choose Connect Claude Code from this item's actions.\n" +
   "macOS asks once for access to Claude Code's login. Choose Always Allow.\n" +
@@ -91,7 +93,13 @@ export async function fetchClaudeUsage(deps: Deps, settings: Settings): Promise<
         "macOS denied access to Claude Code's Keychain login, used claude.ai session",
       );
     }
-    throw new ProviderError("auth", "macOS denied access to Claude Code's login in the Keychain", KEYCHAIN_DENIED_HINT);
+    throw new ProviderError(
+      "auth",
+      "macOS denied access to Claude Code's login in the Keychain",
+      KEYCHAIN_DENIED_HINT,
+      undefined,
+      "keychain-denied",
+    );
   }
 
   if (sessionKey) {
