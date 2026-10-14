@@ -7,7 +7,9 @@ import { ProviderError, ProviderUsage, Settings } from "../types";
 const GLOBAL_ORIGIN = "https://api.moonshot.ai";
 const CHINA_ORIGIN = "https://api.moonshot.cn";
 const CREATE_KEY_URL = "https://platform.moonshot.ai/console/api-keys";
-const AUTH_HINT = "Check the Moonshot API key and region in the extension preferences";
+const AUTH_HINT =
+  "Choose Connect Moonshot from this item's actions to enter a new key, " +
+  "or check the key and region in the extension preferences";
 
 export async function fetchMoonshotUsage(deps: Deps, settings: Settings): Promise<ProviderUsage> {
   const apiKey = settings.moonshotApiKey?.trim();
@@ -15,7 +17,8 @@ export async function fetchMoonshotUsage(deps: Deps, settings: Settings): Promis
     throw new ProviderError(
       "not-connected",
       "No Moonshot API key",
-      `Add your Moonshot API key in the extension preferences. Create one at ${CREATE_KEY_URL}`,
+      "Choose Connect Moonshot from this item's actions.\n" +
+        `Or add your Moonshot API key in the extension preferences. Create one at ${CREATE_KEY_URL}`,
     );
   }
 

@@ -7,12 +7,14 @@ import {
   Icon,
   Keyboard,
   List,
+  open,
   openExtensionPreferences,
   showToast,
   Toast,
 } from "@raycast/api";
 import { getFavicon } from "@raycast/utils";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { JSX, useCallback, useEffect, useRef, useState } from "react";
+import { ApiKeyForm, ApiKeyMethod, SecretForm } from "./components/connect-forms";
 import {
   DisplayMode,
   detailMarkdown,
@@ -23,8 +25,12 @@ import {
   summaryText,
   Tone,
 } from "./lib/format";
+import { connectLocal, ConnectOutcome, LocalConnectMethod } from "./lib/connect";
+import { Connections } from "./lib/connections";
+import { forgetConnections, loadConnections, saveConnections } from "./lib/connections-store";
 import { getGitHubToken, signInWithGitHub, signOutOfGitHub } from "./lib/github-auth";
 import { realDeps } from "./lib/deps";
+import { signInWithOpenRouter } from "./lib/openrouter-signin";
 import { PROVIDERS, Provider } from "./lib/providers";
 import { toSettings } from "./lib/settings";
 import {
@@ -32,6 +38,7 @@ import {
   applySuccess,
   Cached,
   initialStates,
+  isNotConnected,
   providersToRefresh,
   sections,
   startRefresh,
@@ -128,15 +135,99 @@ const TONE_COLORS: Record<Tone, Color.ColorLike> = {
   neutral: Color.SecondaryText,
 };
 
+// Connect reads best with the product's own name for these three. Every other provider reads "Connect <name>".
+const CONNECT_TITLES: Partial<Record<ProviderId, string>> = {
+  claude: "Connect Claude Code",
+  gemini: "Connect Gemini CLI",
+  copilot: "Connect GitHub",
+};
+
+// Pasting an OpenRouter key by hand, for someone who would rather not sign in with OpenRouter.
+const OPENROUTER_KEY: ApiKeyMethod = {
+  kind: "api-key",
+  field: "openrouterApiKey",
+  keyUrl: "https://openrouter.ai/settings/keys",
+  keyPattern: /^sk-or-[A-Za-z0-9-]{20,}$/,
+  placeholder: "sk-or-v1-…",
+};
+
+function connectTitle(provider: Provider): string {
+  return CONNECT_TITLES[provider.id] ?? `Connect ${provider.name}`;
+}
+
+// A fallback is a way in for when Connect can't reach a provider's login, such as a cookie the user copies by
+// hand. Most providers have none.
+function fallbackAction(
+  provider: Provider,
+  settings: Settings,
+  onConnected: (connections: Connections) => void,
+): JSX.Element | undefined {
+  switch (provider.id) {
+    case "claude":
+      return (
+        <Action.Push
+          key="fallback"
+          title="Use claude.ai Session Key"
+          icon={Icon.Key}
+          target={
+            <SecretForm
+              title="claude.ai Session Key"
+              field="claudeSessionKey"
+              placeholder="sk-ant-sid01-…"
+              description="Copy the sessionKey cookie for claude.ai from your browser's developer tools. Use it only when Connect Claude Code can't find the login."
+              onConnected={onConnected}
+            />
+          }
+        />
+      );
+    case "cursor":
+      return (
+        <Action.Push
+          key="fallback"
+          title="Use Cursor Session Cookie"
+          icon={Icon.Key}
+          target={
+            <SecretForm
+              title="Cursor Session Cookie"
+              field="cursorCookie"
+              placeholder="user_…%3A%3AeyJ…"
+              description="Copy the WorkosCursorSessionToken cookie for cursor.com from your browser's developer tools. Use it only when Connect Cursor can't find the login."
+              onConnected={onConnected}
+            />
+          }
+        />
+      );
+    case "openrouter":
+      return (
+        <Action.Push
+          key="fallback"
+          title="Enter API Key"
+          icon={Icon.Key}
+          target={
+            <ApiKeyForm provider={provider} method={OPENROUTER_KEY} settings={settings} onConnected={onConnected} />
+          }
+        />
+      );
+    default:
+      return undefined;
+  }
+}
+
 interface ProviderItemProps {
   provider: Provider;
   state: ProviderState;
   mode: DisplayMode;
   now: number;
+  // The settings the key form checks a key with, built from the preferences and the saved connections.
+  settings: Settings;
+  // Whether Connect saved something for this provider, so Disconnect has something to remove.
+  connected: boolean;
   // Set only for Copilot when no token is in the preferences. undefined means the sign-in actions don't apply.
   gitHubSignedIn?: boolean;
   onRefresh: () => void;
-  onSignIn: () => void;
+  onConnect: () => void;
+  onConnected: (connections: Connections) => void;
+  onDisconnect: () => void;
   onSignOut: () => void;
 }
 
@@ -145,9 +236,13 @@ function ProviderItem({
   state,
   mode,
   now,
+  settings,
+  connected,
   gitHubSignedIn,
   onRefresh,
-  onSignIn,
+  onConnect,
+  onConnected,
+  onDisconnect,
   onSignOut,
 }: ProviderItemProps) {
   const { usage, failure } = state;
@@ -174,6 +269,27 @@ function ProviderItem({
     </List.Item.Detail.Metadata>
   );
 
+  const connect = provider.connect;
+  const connectAction =
+    connect.kind === "api-key" ? (
+      <Action.Push
+        key="connect"
+        title={connectTitle(provider)}
+        icon={Icon.Plug}
+        target={<ApiKeyForm provider={provider} method={connect} settings={settings} onConnected={onConnected} />}
+      />
+    ) : (
+      <Action key="connect" title={connectTitle(provider)} icon={Icon.Plug} onAction={onConnect} />
+    );
+  const connectActions: JSX.Element[] = [connectAction];
+  const fallback = fallbackAction(provider, settings, onConnected);
+  if (fallback) {
+    connectActions.push(fallback);
+  }
+  // Connect goes first when there is nothing to show, or when the saved login was rejected, since that is what the user
+  // needs next. Otherwise it sits after Copy Usage, so Enter still refreshes a working provider.
+  const connectFirst = isNotConnected(state) || failure?.kind === "auth";
+
   return (
     <List.Item
       title={provider.name}
@@ -183,6 +299,7 @@ function ProviderItem({
       detail={<List.Item.Detail markdown={detailMarkdown(provider.name, state, mode, now)} metadata={metadata} />}
       actions={
         <ActionPanel>
+          {connectFirst && connectActions}
           <Action
             title="Refresh"
             icon={Icon.ArrowClockwise}
@@ -196,13 +313,26 @@ function ProviderItem({
             icon={Icon.Clipboard}
             shortcut={Keyboard.Shortcut.Common.Copy}
           />
+          {!connectFirst && connectActions}
+          {connected && (
+            <Action
+              title="Disconnect"
+              icon={Icon.Logout}
+              style={Action.Style.Destructive}
+              shortcut={Keyboard.Shortcut.Common.Remove}
+              onAction={onDisconnect}
+            />
+          )}
           {gitHubSignedIn === true && <Action title="Sign out of GitHub" icon={Icon.Logout} onAction={onSignOut} />}
-          {gitHubSignedIn === false && <Action title="Sign in with GitHub" icon={Icon.Person} onAction={onSignIn} />}
           <Action title="Open Extension Preferences" icon={Icon.Gear} onAction={openExtensionPreferences} />
         </ActionPanel>
       }
     />
   );
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 export default function Command() {
@@ -227,28 +357,59 @@ export default function Command() {
     };
   }, []);
 
-  const settings = toSettings(preferences, {}, gitHubToken);
+  // The connections Connect saved are read before the first fetch as well, so a provider connected earlier is fetched
+  // with its key. A failed read counts as none saved, which only means the user connects again.
+  const [connections, setConnections] = useState<Connections>();
+  useEffect(() => {
+    let active = true;
+    loadConnections()
+      .catch((): Connections => ({}))
+      .then((saved) => {
+        if (active) {
+          setConnections(saved);
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  // A Connect still waiting for a browser or a CLI is stopped when the command closes, so it doesn't outlive the view.
+  const closeRef = useRef<AbortController | undefined>(undefined);
+  useEffect(() => {
+    const controller = new AbortController();
+    closeRef.current = controller;
+    return () => controller.abort();
+  }, []);
+
+  const settings = toSettings(preferences, connections, gitHubToken);
   const { states, refresh } = useUsage();
 
-  // The first refresh waits for the GitHub token check, and then runs once.
+  // The first refresh waits for the GitHub token and the saved connections, and then runs once.
   const startedRef = useRef(false);
+  const ready = gitHubTokenChecked && connections !== undefined;
   useEffect(() => {
-    if (gitHubTokenChecked && !startedRef.current) {
+    if (ready && !startedRef.current) {
       startedRef.current = true;
       void refresh(settings, { force: false });
     }
-  }, [gitHubTokenChecked, refresh, settings]);
+  }, [ready, refresh, settings]);
+
+  // Refreshes every provider with the given connections. A forced refresh, so a new or removed login shows at once.
+  function refreshWith(next: Connections) {
+    return refresh(toSettings(preferences, next, gitHubToken), { force: true });
+  }
 
   async function signIn() {
     try {
       const token = await signInWithGitHub();
       setGitHubToken(token);
-      await refresh(toSettings(preferences, {}, token), { force: true });
+      await refresh(toSettings(preferences, connections, token), { force: true });
     } catch (error) {
       await showToast({
         style: Toast.Style.Failure,
         title: "Could not sign in with GitHub",
-        message: error instanceof Error ? error.message : String(error),
+        message: errorMessage(error),
       });
     }
   }
@@ -257,12 +418,102 @@ export default function Command() {
     try {
       await signOutOfGitHub();
       setGitHubToken(undefined);
-      await refresh(toSettings(preferences, {}, undefined), { force: true });
+      await refresh(toSettings(preferences, connections, undefined), { force: true });
     } catch (error) {
       await showToast({
         style: Toast.Style.Failure,
         title: "Could not sign out of GitHub",
-        message: error instanceof Error ? error.message : String(error),
+        message: errorMessage(error),
+      });
+    }
+  }
+
+  // Claude, Codex, Cursor and Gemini sign in with their own CLI or app on this Mac. The toast shows what that is doing.
+  async function connectTool(provider: Provider, method: LocalConnectMethod) {
+    const toast = await showToast({ style: Toast.Style.Animated, title: `Connecting ${provider.name}` });
+    const outcome = await connectLocal(realDeps(), method, {
+      progress: (title, message) => {
+        toast.title = title;
+        toast.message = message;
+      },
+      save: async (patch) => setConnections(await saveConnections(patch)),
+      signal: closeRef.current?.signal,
+    }).catch((error: unknown): ConnectOutcome => ({
+      kind: "failed",
+      title: `Could not connect ${provider.name}`,
+      message: errorMessage(error),
+    }));
+
+    if (outcome.kind === "connected") {
+      toast.style = Toast.Style.Success;
+      toast.title = `${provider.name} connected`;
+      toast.message = undefined;
+      // The saved connections are read again, so the refresh uses exactly what was stored.
+      await refreshWith(await loadConnections());
+      return;
+    }
+    toast.style = Toast.Style.Failure;
+    toast.title = outcome.title;
+    toast.message = outcome.message;
+    if (outcome.help) {
+      const help = outcome.help;
+      toast.primaryAction = { title: help.title, onAction: () => void open(help.url) };
+    }
+  }
+
+  // OpenRouter's sign-in returns a key that OpenRouter made, which is saved like any other connection.
+  async function connectOpenRouter(provider: Provider) {
+    const toast = await showToast({
+      style: Toast.Style.Animated,
+      title: `Connecting ${provider.name}`,
+      message: "Finish in your browser",
+    });
+    try {
+      const next = await saveConnections({ openrouterApiKey: await signInWithOpenRouter(realDeps()) });
+      setConnections(next);
+      toast.style = Toast.Style.Success;
+      toast.title = `${provider.name} connected`;
+      toast.message = undefined;
+      await refreshWith(next);
+    } catch (error) {
+      toast.style = Toast.Style.Failure;
+      toast.title = `Could not connect ${provider.name}`;
+      toast.message = errorMessage(error);
+    }
+  }
+
+  // Runs the Connect action for a provider. API key providers never get here, since their action opens a form instead.
+  async function connect(provider: Provider): Promise<void> {
+    const method = provider.connect;
+    switch (method.kind) {
+      case "claude":
+      case "codex":
+      case "gemini":
+      case "cursor":
+        await connectTool(provider, method);
+        return;
+      case "github":
+        await signIn();
+        return;
+      case "openrouter":
+        await connectOpenRouter(provider);
+        return;
+      case "api-key":
+        return;
+    }
+  }
+
+  // Removes what Connect saved for this provider. Keys typed into the preferences stay, since the user owns those.
+  async function disconnect(provider: Provider) {
+    try {
+      const next = await forgetConnections(provider.forget);
+      setConnections(next);
+      await refreshWith(next);
+    } catch (error) {
+      await showToast({
+        style: Toast.Style.Failure,
+        title: `Could not disconnect ${provider.name}`,
+        message: errorMessage(error),
       });
     }
   }
@@ -282,9 +533,16 @@ export default function Command() {
         state={states[provider.id]}
         mode={mode}
         now={now}
+        settings={settings}
+        connected={provider.forget.some((key) => connections?.[key] !== undefined)}
         gitHubSignedIn={provider.id === "copilot" && !hasPreferenceToken ? gitHubToken !== undefined : undefined}
         onRefresh={() => refresh(settings, { force: true })}
-        onSignIn={() => void signIn()}
+        onConnect={() => void connect(provider)}
+        onConnected={(next) => {
+          setConnections(next);
+          void refreshWith(next);
+        }}
+        onDisconnect={() => void disconnect(provider)}
         onSignOut={() => void signOut()}
       />
     );
@@ -299,7 +557,7 @@ export default function Command() {
       {!isLoading && usageProviders.length === 0 && notConnectedProviders.length === 0 && (
         <List.EmptyView
           title="No AI Tools Connected"
-          description="Add a key or cookie in the extension preferences, or sign in to Claude Code, Codex, Cursor or Gemini CLI on this Mac."
+          description="Choose Connect on a provider to sign in or add its key. Turn on Providers in the extension preferences to list the ones that aren't connected."
           icon={Icon.Gauge}
           actions={
             <ActionPanel>

@@ -5,7 +5,8 @@ import { Balance, ProviderError, ProviderUsage, Settings } from "../types";
 
 const BALANCE_URL = "https://api.deepseek.com/user/balance";
 const CREATE_KEY_URL = "https://platform.deepseek.com/api_keys";
-const AUTH_HINT = "Check the DeepSeek API key in the extension preferences";
+const AUTH_HINT =
+  "Choose Connect DeepSeek from this item's actions to enter a new key, or check the key in the extension preferences";
 
 interface CurrencyBalance {
   currency: string;
@@ -21,7 +22,8 @@ export async function fetchDeepSeekUsage(deps: Deps, settings: Settings): Promis
     throw new ProviderError(
       "not-connected",
       "No DeepSeek API key",
-      `Add your DeepSeek API key in the extension preferences. Create one at ${CREATE_KEY_URL}`,
+      "Choose Connect DeepSeek from this item's actions.\n" +
+        `Or add your DeepSeek API key in the extension preferences. Create one at ${CREATE_KEY_URL}`,
     );
   }
 

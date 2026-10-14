@@ -82,7 +82,9 @@ describe("fetchOpenRouterUsage", () => {
     const error = await fetchOpenRouterUsage(deps, settings).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(ProviderError);
     expect((error as ProviderError).kind).toBe("auth");
-    expect((error as ProviderError).hint).toBe("Check the OpenRouter API key in the extension preferences");
+    expect((error as ProviderError).hint).toBe(
+      "Choose Connect OpenRouter from this item's actions to sign in again, or check the key in the extension preferences",
+    );
   });
 
   it("rethrows the key call's error when both calls fail", async () => {

@@ -6,7 +6,8 @@ const GLOBAL_QUOTA_URL = "https://api.z.ai/api/monitor/usage/quota/limit";
 // The China console serves the same quota path on the BigModel host.
 const CHINA_QUOTA_URL = "https://open.bigmodel.cn/api/monitor/usage/quota/limit";
 const CREATE_KEY_URL = "https://z.ai/manage-apikey";
-const AUTH_HINT = "Check the z.ai API key in the extension preferences";
+const AUTH_HINT =
+  "Choose Connect z.ai from this item's actions to enter a new key, or check the key in the extension preferences";
 const CODING_PLAN_HINT = "Check that this key belongs to a GLM Coding Plan";
 
 // Codes in the response envelope that mean the key was refused. Other codes are reported as plain HTTP errors.
@@ -38,7 +39,8 @@ export async function fetchZaiUsage(deps: Deps, settings: Settings): Promise<Pro
     throw new ProviderError(
       "not-connected",
       "No z.ai API key",
-      `Add your z.ai API key in the extension preferences. Create one at ${CREATE_KEY_URL}`,
+      "Choose Connect z.ai from this item's actions.\n" +
+        `Or add your z.ai API key in the extension preferences. Create one at ${CREATE_KEY_URL}`,
     );
   }
 

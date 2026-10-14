@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { ConnectMethod } from "../src/lib/connect";
+import { Connections } from "../src/lib/connections";
 import { PROVIDERS } from "../src/lib/providers";
 import { ProviderError, ProviderId, Settings } from "../src/lib/types";
 import { fakeDeps } from "./fake-deps";
@@ -20,6 +22,55 @@ const ALL_PROVIDER_IDS: ProviderId[] = [
 ];
 
 const EMPTY_SETTINGS: Settings = {};
+
+const CONNECT_KINDS: ConnectMethod["kind"][] = [
+  "claude",
+  "codex",
+  "gemini",
+  "cursor",
+  "github",
+  "openrouter",
+  "api-key",
+];
+
+// Every field of Connections. Typed as a full record, so a new Connections field fails to compile until it is listed here.
+const CONNECTION_KEYS: Record<keyof Connections, true> = {
+  claudeKeychain: true,
+  claudeSessionKey: true,
+  cursorCookie: true,
+  openrouterApiKey: true,
+  zaiApiKey: true,
+  zaiRegion: true,
+  kimiApiKey: true,
+  deepseekApiKey: true,
+  moonshotApiKey: true,
+  moonshotRegion: true,
+};
+
+describe("provider connect methods", () => {
+  it("gives every provider a Connect method", () => {
+    for (const provider of PROVIDERS) {
+      expect(CONNECT_KINDS).toContain(provider.connect.kind);
+    }
+  });
+
+  it("gives every API-key method an https link to the key page", () => {
+    for (const provider of PROVIDERS) {
+      if (provider.connect.kind === "api-key") {
+        expect(provider.connect.keyUrl).toMatch(/^https:\/\//);
+      }
+    }
+  });
+
+  it("only forgets connections the extension stores", () => {
+    const stored = Object.keys(CONNECTION_KEYS);
+    for (const provider of PROVIDERS) {
+      for (const key of provider.forget) {
+        expect(stored).toContain(key);
+      }
+    }
+  });
+});
 
 describe("provider registry", () => {
   it("has a unique id for every provider", () => {

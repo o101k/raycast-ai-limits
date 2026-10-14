@@ -4,45 +4,51 @@ See how much of your AI coding limits you've used, when they reset, and what cre
 
 Run **Show AI Usage**. Each provider shows its headline limit as a colored tag (green below 70% used, yellow below 90%, red from 90%), with the time until it resets. The detail pane has every window with a progress bar, balances, and any notes.
 
+## Connect
+
+Every provider has a **Connect** action, so you don't need to edit preferences. Choose it and the extension does the rest: it runs the provider's own sign-in, or opens its key page. Connect is the first action on a provider that isn't connected yet, or whose saved login was rejected. **Disconnect** removes what Connect saved.
+
 ## Supported providers
 
-| Provider           | What you need                                                                                                                                                                                                                                                                 |
-| ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Claude**         | The `sessionKey` cookie from claude.ai, pasted into **Claude Session Key**. On macOS, Claude Code usually keeps its login in the Keychain, which this extension doesn't read, so most Mac users need the cookie. If `~/.claude/.credentials.json` exists, it is used instead. |
-| **Codex**          | Sign in with `codex login`. The extension reads `~/.codex/auth.json`.                                                                                                                                                                                                         |
-| **Cursor**         | The Cursor app signed in on this Mac, or the `WorkosCursorSessionToken` cookie from cursor.com pasted into **Cursor Session Cookie**.                                                                                                                                         |
-| **Gemini**         | Sign in with the Gemini CLI (Google login). The extension reads `~/.gemini/oauth_creds.json`. Google retired Gemini CLI sign-in for personal Google accounts in June 2026. It still works with Google Workspace and Gemini Code Assist Standard accounts.                     |
-| **GitHub Copilot** | Choose **Sign in with GitHub** from the Copilot item, which uses Raycast's GitHub OAuth with the `read:user` scope. Or paste a token (for example from `gh auth token`) into **GitHub Token for Copilot**.                                                                    |
-| **OpenRouter**     | An API key in **OpenRouter API Key**.                                                                                                                                                                                                                                         |
-| **z.ai**           | A GLM Coding Plan API key in **z.ai API Key**, and the region it was issued in.                                                                                                                                                                                               |
-| **Kimi Code**      | A Kimi Code (coding plan) API key in **Kimi Code API Key**.                                                                                                                                                                                                                   |
-| **DeepSeek**       | An API key in **DeepSeek API Key**.                                                                                                                                                                                                                                           |
-| **Moonshot**       | An API key in **Moonshot API Key**, and the region it was issued in.                                                                                                                                                                                                          |
+| Provider           | What you need                                                                                                                                                                                                                                              |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Claude**         | Choose **Connect Claude Code**. It reads Claude Code's login from the macOS Keychain after you allow it once, and runs `claude auth login` if Claude Code isn't signed in. If `~/.claude/.credentials.json` exists, it is used too.                        |
+| **Codex**          | Choose **Connect Codex**. It runs `codex login`, and the extension then reads `~/.codex/auth.json`.                                                                                                                                                        |
+| **Cursor**         | Choose **Connect Cursor**. It opens the Cursor app so you can sign in there.                                                                                                                                                                               |
+| **Gemini**         | Choose **Connect Gemini CLI**. It opens Gemini CLI in Terminal so you can sign in with Google. Google retired Gemini CLI sign-in for personal Google accounts in June 2026. It still works with Google Workspace and Gemini Code Assist Standard accounts. |
+| **GitHub Copilot** | Choose **Connect GitHub**. It signs in with GitHub OAuth, using the `read:user` scope. Or paste a token (for example from `gh auth token`) into **GitHub Token for Copilot**.                                                                              |
+| **OpenRouter**     | Choose **Connect OpenRouter**. OpenRouter's OAuth creates an API key for you, and the extension saves it. Or paste a key with **Enter API Key**.                                                                                                           |
+| **z.ai**           | Choose **Connect z.ai**. It opens the key page for a GLM Coding Plan key. The key fills in when you copy it, and you pick the region it was issued in.                                                                                                     |
+| **Kimi Code**      | Choose **Connect Kimi Code**. It opens the key page for a Kimi Code (coding plan) key. The key fills in when you copy it.                                                                                                                                  |
+| **DeepSeek**       | Choose **Connect DeepSeek**. It opens the key page. The key fills in when you copy it.                                                                                                                                                                     |
+| **Moonshot**       | Choose **Connect Moonshot**. It opens the key page. The key fills in when you copy it, and you pick the region it was issued in.                                                                                                                           |
 
-Providers without credentials appear under **Not Connected**, with the steps to connect them. Turn that section off with the **Providers** preference.
+Providers without credentials appear under **Not Connected**, each with its Connect action. Turn that section off with the **Providers** preference.
 
 ## Preferences
 
 - **Show Limits As**: percent used (default) or percent left.
 - **Providers**: show or hide providers that aren't connected.
-- The provider keys and cookies listed above. Each is optional, and only needed when the extension can't find the credentials on this Mac.
+- The provider keys and cookies listed above. Each is optional. A value typed here is used instead of the one Connect saved.
 
-## How to copy a session cookie
+## Fallback: copy a session cookie
 
-The Claude and Cursor preferences need a browser cookie. This is how to copy one in Chrome or Safari:
+Claude and Cursor have a fallback for when Connect can't read their login: **Use claude.ai Session Key** and **Use Cursor Session Cookie**. They need a browser cookie. This is how to copy one in Chrome or Safari:
 
 1. Sign in to the site (claude.ai or cursor.com) in your browser.
 2. Open the developer tools: in Chrome, press Cmd+Option+I, then open the **Application** tab. In Safari, enable the Develop menu in Settings > Advanced, then press Cmd+Option+I.
 3. In the left sidebar, open **Cookies** and choose the site.
 4. Click the cookie (`sessionKey` for claude.ai, `WorkosCursorSessionToken` for cursor.com) and copy its **Value**.
-5. Paste it into the matching preference in Raycast.
+5. Paste it into the matching action in Raycast, or into the matching preference.
 
 Cookies expire when the site signs you out. When a provider says the credentials were rejected, copy a fresh one.
 
 ## Privacy
 
 - Your credentials stay on this Mac. They are only sent to the provider they belong to, over HTTPS.
-- Claude Code stores its login in the macOS Keychain. This extension doesn't read it: Raycast extensions shouldn't read other apps' Keychain items, and doing so would prompt for your password. Claude's usage comes from `~/.claude/.credentials.json` when it exists, or from the session cookie.
+- Keys and cookies saved by Connect are stored in Raycast's encrypted local storage. **Disconnect** removes them. Values in the preferences are kept by Raycast, and Disconnect doesn't touch them.
+- Claude Code stores its login in the macOS Keychain. The extension reads that item only after you choose **Connect Claude Code**. It uses the system `security` tool, so macOS asks you first. It reads only the access token, and it never refreshes or writes it.
+- Claude's usage comes from the Keychain, from `~/.claude/.credentials.json` when it exists, or from the session cookie.
 - The extension never writes to other apps' files. It never refreshes a token in a way that would sign out Claude Code or Codex, since those CLIs rotate their refresh tokens.
 - Cursor's local database is opened read-only, with the system `sqlite3` tool.
 - The usage numbers are cached on this Mac so the list opens instantly. Nothing is sent anywhere else. There is no analytics.

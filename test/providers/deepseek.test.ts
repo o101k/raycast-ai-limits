@@ -56,7 +56,9 @@ describe("fetchDeepSeekUsage", () => {
     const deps = fakeDeps({ routes: [{ prefix: BALANCE_URL, respond: { status: 401, body: {} } }] });
     const error = await fetchDeepSeekUsage(deps, settings).catch((e: unknown) => e);
     expect((error as ProviderError).kind).toBe("auth");
-    expect((error as ProviderError).hint).toBe("Check the DeepSeek API key in the extension preferences");
+    expect((error as ProviderError).hint).toBe(
+      "Choose Connect DeepSeek from this item's actions to enter a new key, or check the key in the extension preferences",
+    );
   });
 
   it("throws http on a server error", async () => {

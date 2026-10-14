@@ -23,7 +23,8 @@ export const TOKEN_QUERY = "SELECT value FROM ItemTable WHERE key = 'cursorAuth/
 const EXPIRY_MARGIN_SECONDS = 60;
 
 const SIGN_IN_HINT =
-  'Sign in to the Cursor app on this Mac, or paste the WorkosCursorSessionToken cookie from cursor.com (Developer Tools > Application > Cookies) into the "Cursor Session Cookie" preference';
+  "Choose Connect Cursor from this item's actions.\n" +
+  'Or paste the WorkosCursorSessionToken cookie from cursor.com (Developer Tools > Application > Cookies) into the "Cursor Session Cookie" preference';
 const COOKIE_AUTH_HINT =
   'Copy a fresh WorkosCursorSessionToken cookie from cursor.com into the "Cursor Session Cookie" preference';
 const APP_AUTH_HINT = "Open Cursor to refresh its login";

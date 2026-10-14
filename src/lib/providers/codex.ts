@@ -17,7 +17,9 @@ const AUTH_HINT = "Run `codex` in a terminal to refresh your login";
 // The CLI refreshes its tokens about every 8 days. A login older than that is the likely cause of a 401.
 const STALE_LOGIN_MS = 8 * 24 * 60 * 60 * 1000;
 const STALE_HINT = "Your Codex login is more than 8 days old. Run `codex` in a terminal to refresh it";
-const NOT_CONNECTED_HINT = "Install the Codex CLI and run `codex login` to sign in with ChatGPT";
+const NOT_CONNECTED_HINT =
+  "Choose Connect Codex from this item's actions.\n" +
+  "Or install the Codex CLI, then run `codex login` to sign in with ChatGPT";
 
 // Codex keeps the ChatGPT account id in a namespaced claim of its id_token.
 const AUTH_CLAIM = "https://api.openai.com/auth";

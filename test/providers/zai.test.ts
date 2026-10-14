@@ -115,7 +115,7 @@ describe("fetchZaiUsage", () => {
       const error = await errorOf(fetchZaiUsage(deps, { zaiApiKey }));
       expect(error.kind).toBe("not-connected");
       expect(error.message).toBe("No z.ai API key");
-      expect(error.hint).toContain("Add your z.ai API key in the extension preferences");
+      expect(error.hint).toContain("Or add your z.ai API key in the extension preferences");
       expect(deps.requests).toHaveLength(0);
     }
   });
@@ -124,7 +124,9 @@ describe("fetchZaiUsage", () => {
     const deps = fakeDeps({ routes: [{ prefix: GLOBAL_URL, respond: { status: 401, body: {} } }] });
     const error = await errorOf(fetchZaiUsage(deps, settings));
     expect(error.kind).toBe("auth");
-    expect(error.hint).toBe("Check the z.ai API key in the extension preferences");
+    expect(error.hint).toBe(
+      "Choose Connect z.ai from this item's actions to enter a new key, or check the key in the extension preferences",
+    );
     expect(error.message).not.toContain("zai-test-key");
   });
 

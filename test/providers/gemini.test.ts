@@ -271,7 +271,9 @@ describe("fetchGeminiUsage settings and credentials", () => {
     const error = await fetchGeminiUsage(deps).catch((e: unknown) => e);
 
     expect(error).toMatchObject({ kind: "not-connected" });
-    expect((error as ProviderError).hint).toBe("Install Gemini CLI and run `gemini` to sign in with Google");
+    expect((error as ProviderError).hint).toBe(
+      "Choose Connect Gemini CLI from this item's actions.\nOr install Gemini CLI, then run `gemini` to sign in with Google",
+    );
     expect(deps.requests).toEqual([]);
   });
 

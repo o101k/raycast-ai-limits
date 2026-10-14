@@ -230,7 +230,7 @@ describe("fetchCopilotUsage", () => {
     const deps = fakeDeps({ routes: copilotRoutes({ message: "Bad credentials" }, 403) });
     await expect(fetchCopilotUsage(deps, { githubOAuthToken: "gho_old" })).rejects.toMatchObject({
       kind: "auth",
-      hint: "Sign in with GitHub again",
+      hint: "Choose Connect GitHub from this item's actions to sign in again",
     });
   });
 

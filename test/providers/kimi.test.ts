@@ -80,7 +80,9 @@ describe("fetchKimiUsage", () => {
     });
     const error = await fetchKimiUsage(deps, settings).catch((e: unknown) => e);
     expect((error as ProviderError).kind).toBe("auth");
-    expect((error as ProviderError).hint).toBe("Check the Kimi Code API key in the extension preferences");
+    expect((error as ProviderError).hint).toBe(
+      "Choose Connect Kimi Code from this item's actions to enter a new key, or check the key in the extension preferences",
+    );
     expect(deps.requests.map((request) => request.url)).toEqual([PRIMARY, FALLBACK]);
   });
 

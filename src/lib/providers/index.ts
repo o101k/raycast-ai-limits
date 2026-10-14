@@ -1,3 +1,5 @@
+import { ConnectMethod } from "../connect";
+import { Connections } from "../connections";
 import { Deps } from "../deps";
 import { ProviderId, ProviderUsage, Settings } from "../types";
 import { fetchClaudeUsage } from "./claude";
@@ -18,6 +20,10 @@ export interface Provider {
   dashboardUrl: string;
   // Site used for the list icon (via Raycast's favicon helper).
   iconUrl: string;
+  // How Connect signs this provider in.
+  connect: ConnectMethod;
+  // Connections the extension stores for this provider, removed by Disconnect.
+  forget: (keyof Connections)[];
   // Throws a ProviderError with kind "not-connected" when no credentials are found.
   fetchUsage(deps: Deps, settings: Settings): Promise<ProviderUsage>;
 }
@@ -29,6 +35,8 @@ export const PROVIDERS: Provider[] = [
     name: "Claude",
     dashboardUrl: "https://claude.ai/settings/usage",
     iconUrl: "https://claude.ai",
+    connect: { kind: "claude" },
+    forget: ["claudeKeychain", "claudeSessionKey"],
     fetchUsage: fetchClaudeUsage,
   },
   {
@@ -36,6 +44,8 @@ export const PROVIDERS: Provider[] = [
     name: "Codex",
     dashboardUrl: "https://chatgpt.com/codex/settings/usage",
     iconUrl: "https://chatgpt.com",
+    connect: { kind: "codex" },
+    forget: [],
     fetchUsage: fetchCodexUsage,
   },
   {
@@ -43,6 +53,8 @@ export const PROVIDERS: Provider[] = [
     name: "Cursor",
     dashboardUrl: "https://cursor.com/dashboard?tab=usage",
     iconUrl: "https://cursor.com",
+    connect: { kind: "cursor" },
+    forget: ["cursorCookie"],
     fetchUsage: fetchCursorUsage,
   },
   {
@@ -50,6 +62,8 @@ export const PROVIDERS: Provider[] = [
     name: "Gemini",
     dashboardUrl: "https://aistudio.google.com/usage",
     iconUrl: "https://gemini.google.com",
+    connect: { kind: "gemini" },
+    forget: [],
     fetchUsage: fetchGeminiUsage,
   },
   {
@@ -57,6 +71,8 @@ export const PROVIDERS: Provider[] = [
     name: "GitHub Copilot",
     dashboardUrl: "https://github.com/settings/copilot",
     iconUrl: "https://github.com",
+    connect: { kind: "github" },
+    forget: [],
     fetchUsage: fetchCopilotUsage,
   },
   {
@@ -64,6 +80,8 @@ export const PROVIDERS: Provider[] = [
     name: "OpenRouter",
     dashboardUrl: "https://openrouter.ai/settings/credits",
     iconUrl: "https://openrouter.ai",
+    connect: { kind: "openrouter" },
+    forget: ["openrouterApiKey"],
     fetchUsage: fetchOpenRouterUsage,
   },
   {
@@ -71,6 +89,15 @@ export const PROVIDERS: Provider[] = [
     name: "z.ai",
     dashboardUrl: "https://z.ai/manage-apikey/subscription",
     iconUrl: "https://z.ai",
+    connect: {
+      kind: "api-key",
+      field: "zaiApiKey",
+      region: "zaiRegion",
+      keyUrl: "https://z.ai/manage-apikey/apikey-list",
+      keyPattern: /^[A-Za-z0-9]{20,}\.[A-Za-z0-9]{8,}$/,
+      placeholder: "Paste your z.ai API key",
+    },
+    forget: ["zaiApiKey", "zaiRegion"],
     fetchUsage: fetchZaiUsage,
   },
   {
@@ -78,6 +105,14 @@ export const PROVIDERS: Provider[] = [
     name: "Kimi Code",
     dashboardUrl: "https://www.kimi.com/code",
     iconUrl: "https://www.kimi.com",
+    connect: {
+      kind: "api-key",
+      field: "kimiApiKey",
+      keyUrl: "https://www.kimi.com/code/console",
+      keyPattern: /^sk-[A-Za-z0-9_-]{20,}$/,
+      placeholder: "Paste your Kimi Code API key",
+    },
+    forget: ["kimiApiKey"],
     fetchUsage: fetchKimiUsage,
   },
   {
@@ -85,6 +120,14 @@ export const PROVIDERS: Provider[] = [
     name: "DeepSeek",
     dashboardUrl: "https://platform.deepseek.com/usage",
     iconUrl: "https://www.deepseek.com",
+    connect: {
+      kind: "api-key",
+      field: "deepseekApiKey",
+      keyUrl: "https://platform.deepseek.com/api_keys",
+      keyPattern: /^sk-[a-f0-9]{32}$/,
+      placeholder: "Paste your DeepSeek API key",
+    },
+    forget: ["deepseekApiKey"],
     fetchUsage: fetchDeepSeekUsage,
   },
   {
@@ -92,6 +135,15 @@ export const PROVIDERS: Provider[] = [
     name: "Moonshot",
     dashboardUrl: "https://platform.moonshot.ai/console/account",
     iconUrl: "https://www.moonshot.ai",
+    connect: {
+      kind: "api-key",
+      field: "moonshotApiKey",
+      region: "moonshotRegion",
+      keyUrl: "https://platform.moonshot.ai/console/api-keys",
+      keyPattern: /^sk-[A-Za-z0-9]{32,}$/,
+      placeholder: "Paste your Moonshot API key",
+    },
+    forget: ["moonshotApiKey", "moonshotRegion"],
     fetchUsage: fetchMoonshotUsage,
   },
 ];

@@ -24,6 +24,11 @@ To update: `git pull && npm install && npm run dev`, or `npm run build` to build
 - `src/lib/format.ts` holds the pure display helpers (percent, reset times, money, Markdown). It doesn't import Raycast.
 - `src/lib/deps.ts` is the only place that touches files, `sqlite3`, the network and the clock. Providers receive it as an argument.
 - `src/lib/github-auth.ts` holds the GitHub sign-in used by Copilot.
+- `src/components/connect-forms.tsx` holds the forms that the Connect actions push: the API key form, which checks the key and reads the clipboard, and the cookie form.
+- `src/lib/connect.ts` runs the Connect action for Claude Code, Codex, Gemini CLI and Cursor. It uses the helpers in `sign-in.ts` and `keychain.ts`, and it never imports Raycast.
+- `src/lib/sign-in.ts` finds the CLIs, runs their sign-in and checks whether each one is signed in. `src/lib/keychain.ts` reads Claude Code's Keychain item.
+- `src/lib/connections.ts` is the pure part of what Connect saves. `src/lib/connections-store.ts` keeps it in Raycast's LocalStorage.
+- `src/lib/openrouter-auth.ts` holds OpenRouter's OAuth steps. `src/lib/openrouter-signin.ts` runs them with Raycast's OAuth client, so it isn't tested.
 
 ## Checks
 
@@ -51,7 +56,7 @@ When you add a provider, add a test file for it that uses `fakeDeps` only.
 ## Adding a provider
 
 1. Add `src/lib/providers/<id>.ts` that exports `fetch<Name>Usage(deps, settings)` and a pure parser.
-2. Add a `ProviderId` to `src/lib/types.ts`, and register it in `src/lib/providers/index.ts`.
+2. Add a `ProviderId` to `src/lib/types.ts`, and register it in `src/lib/providers/index.ts` with its `connect` method (a `ConnectMethod` from `src/lib/connect.ts`) and the `forget` keys that Disconnect removes.
 3. If it needs a credential, add a preference to `package.json` and a field to `Settings` in `src/lib/types.ts`, and map it in `src/lib/settings.ts`.
 4. Write `test/providers/<id>.test.ts`.
 

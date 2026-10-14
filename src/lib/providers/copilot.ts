@@ -41,7 +41,9 @@ export async function fetchCopilotUsage(deps: Deps, settings: Settings): Promise
     throw new ProviderError(
       "not-connected",
       "No GitHub token for Copilot",
-      'Sign in with GitHub from this item\'s actions, or paste a GitHub token (for example the output of `gh auth token`) into the "GitHub Token for Copilot" preference',
+      "Choose Connect GitHub from this item's actions.\n" +
+        "Or paste a GitHub token (for example the output of `gh auth token`) " +
+        'into the "GitHub Token for Copilot" preference',
     );
   }
   const source = preferenceToken ? "GitHub token" : "GitHub sign-in";
@@ -55,7 +57,10 @@ export async function fetchCopilotUsage(deps: Deps, settings: Settings): Promise
         "User-Agent": "AI-Limits-Raycast",
       },
       provider: "GitHub",
-      authHint: preferenceToken ? "Check the GitHub token in preferences" : "Sign in with GitHub again",
+      // A preference token overrides the signed-in one, so signing in again would change nothing.
+      authHint: preferenceToken
+        ? "Check the GitHub token in preferences"
+        : "Choose Connect GitHub from this item's actions to sign in again",
     });
   } catch (error) {
     // 404 is how this endpoint says the account has no Copilot seat, which is a setup problem rather than an error.
@@ -63,7 +68,9 @@ export async function fetchCopilotUsage(deps: Deps, settings: Settings): Promise
       throw new ProviderError(
         "not-connected",
         "No Copilot subscription on this GitHub account",
-        "Use a GitHub account that has Copilot (see github.com/settings/copilot), or paste a token for that account",
+        "Choose Connect GitHub from this item's actions, and sign in with an account that has Copilot " +
+          "(see github.com/settings/copilot).\n" +
+          "Or paste a token for that account into the GitHub Token for Copilot preference",
       );
     }
     throw error;

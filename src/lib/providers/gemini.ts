@@ -20,7 +20,9 @@ const API_KEY_AUTH_TYPES = new Set(["gemini-api-key", "vertex-ai", "api-key"]);
 // Refresh when the access token expires within a minute, so the requests don't race the expiry.
 const EXPIRY_MARGIN_MS = 60_000;
 
-const INSTALL_HINT = "Install Gemini CLI and run `gemini` to sign in with Google";
+const INSTALL_HINT =
+  "Choose Connect Gemini CLI from this item's actions.\n" +
+  "Or install Gemini CLI, then run `gemini` to sign in with Google";
 const RELOGIN_HINT = "Run `gemini` once to refresh your login";
 const CONSUMER_RETIRED_HINT =
   "Gemini CLI sign-in for personal Google accounts was retired in June 2026; use a Workspace or Code Assist Standard account";

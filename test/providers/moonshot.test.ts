@@ -66,7 +66,9 @@ describe("fetchMoonshotUsage", () => {
     const deps = fakeDeps({ routes: [{ prefix: GLOBAL_URL, respond: { status: 401, body: {} } }] });
     const error = await fetchMoonshotUsage(deps, settings).catch((e: unknown) => e);
     expect((error as ProviderError).kind).toBe("auth");
-    expect((error as ProviderError).hint).toBe("Check the Moonshot API key and region in the extension preferences");
+    expect((error as ProviderError).hint).toBe(
+      "Choose Connect Moonshot from this item's actions to enter a new key, or check the key and region in the extension preferences",
+    );
   });
 
   it("throws parse on a body that isn't JSON", async () => {

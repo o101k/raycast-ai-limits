@@ -7,7 +7,8 @@ import { ProviderError, ProviderUsage, Settings, UsageWindow } from "../types";
 const PRIMARY_URL = "https://api.kimi.com/coding/v1/usages";
 const FALLBACK_URL = "https://api.kimi.ai/coding/v1/usages";
 const CREATE_KEY_URL = "https://www.kimi.com/code/console";
-const AUTH_HINT = "Check the Kimi Code API key in the extension preferences";
+const AUTH_HINT =
+  "Choose Connect Kimi Code from this item's actions to enter a new key, or check the key in the extension preferences";
 const FIVE_HOUR_MINUTES = 300;
 const WEEKLY_MINUTES = 7 * 24 * 60;
 const MONTHLY_MINUTES = 30 * 24 * 60;
@@ -38,7 +39,8 @@ export async function fetchKimiUsage(deps: Deps, settings: Settings): Promise<Pr
     throw new ProviderError(
       "not-connected",
       "No Kimi Code API key",
-      `Add your Kimi Code API key in the extension preferences. Create one at ${CREATE_KEY_URL}`,
+      "Choose Connect Kimi Code from this item's actions.\n" +
+        `Or add your Kimi Code API key in the extension preferences. Create one at ${CREATE_KEY_URL}`,
     );
   }
 
