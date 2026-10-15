@@ -19,8 +19,10 @@ export interface Transition {
 export type Fingerprints = Partial<Record<ProviderId, string>>;
 
 // The settings each provider reads its login from. Changing any of them makes that provider's saved results stale.
+// claudeKeychain is left out: a refresh turns it off when macOS refuses the read, and that must not drop Claude's
+// cooldown, since the account is the same.
 const CREDENTIAL_SETTINGS: Record<ProviderId, readonly (keyof Settings)[]> = {
-  claude: ["claudeKeychain", "claudeConfigDir", "claudeSessionKey"],
+  claude: ["claudeConfigDir", "claudeSessionKey"],
   codex: ["codexHome"],
   cursor: ["cursorCookie"],
   gemini: [],
