@@ -15,7 +15,7 @@ const CODING_PLAN_HINT = "Check that this key belongs to a GLM Coding Plan";
 // Codes in the response envelope that mean the key was refused. Other codes are reported as plain HTTP errors.
 const AUTH_CODES = new Set([401, 403]);
 const KNOWN_TYPES = new Set(["TOKENS_LIMIT", "CREDIT_LIMIT", "TIME_LIMIT"]);
-// Minutes per unit code. Units come from z.ai's quota API, which CodexBar reads the same way.
+// Minutes per unit code. Units come from z.ai's quota API.
 const MINUTES_PER_UNIT: Record<number, number> = { 1: 1440, 3: 60, 5: 1, 6: 10080 };
 const UNIT_NAMES: Record<number, string> = { 1: "Day", 3: "Hour", 5: "Minute", 6: "Week" };
 // TIME_LIMIT with unit 5 and number 1 is the monthly MCP allowance, which the API marks this way.
@@ -62,7 +62,7 @@ export function parseZaiUsage(json: unknown, fetchedAt: number, authHint = AUTH_
   if (!root) {
     throw new ProviderError("parse", "z.ai returned an unexpected response");
   }
-  // CodexBar only trusts the answer when both the envelope flag and its code say success.
+  // The answer is only trusted when both the envelope flag and its code say success.
   if (root.success !== true || asNumber(root.code) !== 200) {
     const code = asNumber(root.code);
     if (code !== undefined && AUTH_CODES.has(code)) {
@@ -130,8 +130,8 @@ function parseLimit(raw: unknown): ParsedLimit | undefined {
   return { ...limit, percent, minutes: windowMinutes(limit) };
 }
 
-// Counts beat the server's percentage when a limit is known. CodexBar does the same, and the percentage is kept as a
-// fallback for limits that only report that.
+// Counts beat the server's percentage when a limit is known. The percentage is kept as a fallback for limits that
+// only report that.
 function usedPercent(limit: ZaiLimit): number | undefined {
   const { usage, currentValue, remaining } = limit;
   if (usage !== undefined && usage > 0) {

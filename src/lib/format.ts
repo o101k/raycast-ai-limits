@@ -8,8 +8,8 @@ export type DisplayMode = "used" | "remaining";
 // Semantic colors for the usage level. The view maps these to Raycast colors.
 export type Level = "ok" | "warning" | "critical";
 
-// The tone of a list tag. "neutral" is for providers that simply aren't connected.
-export type Tone = Level | "error" | "neutral";
+// The tone of a list tag: the usage level of the limit it shows.
+export type Tone = Level;
 
 export interface Failure {
   kind: ProviderErrorKind;
@@ -52,10 +52,15 @@ export function headlineWindow(usage: ProviderUsage | undefined): UsageWindow | 
   return headline;
 }
 
+// The percent wording for a usage number. Windows and balances with a limit both use it.
+function percentText(usedPercent: number, mode: DisplayMode): string {
+  const used = clampPercent(usedPercent);
+  return mode === "remaining" ? `${Math.round(100 - used)}% left` : `${Math.round(used)}% used`;
+}
+
 // "62% used" or "38% left", depending on the Show Limits As preference.
 export function formatPercent(window: UsageWindow, mode: DisplayMode): string {
-  const used = clampPercent(window.usedPercent);
-  return mode === "remaining" ? `${Math.round(100 - used)}% left` : `${Math.round(used)}% used`;
+  return percentText(window.usedPercent, mode);
 }
 
 // Green below 70% used, yellow below 90%, red from 90% on. Always based on usage, not on the display mode, so the
@@ -68,10 +73,20 @@ export function levelColor(usedPercent: number): Level {
   return used < 90 ? "warning" : "critical";
 }
 
-// A text bar of filled and empty blocks. It is shown in a code span, so it stays monospaced in the detail pane.
-export function progressBar(usedPercent: number, width = 20): string {
-  const filled = Math.round((clampPercent(usedPercent) * width) / 100);
-  return "█".repeat(filled) + "░".repeat(width - filled);
+const LEVEL_HEX: Record<Level, string> = { ok: "#59D499", warning: "#FFC531", critical: "#FF6363" };
+
+// A rounded progress bar as an SVG data URI, colored by level, for the detail pane's Markdown. The empty part is a
+// translucent gray, so the bar reads in both light and dark themes.
+export function progressBarImage(usedPercent: number): string {
+  const filled = Math.round((clampPercent(usedPercent) * 300) / 100);
+  const color = LEVEL_HEX[levelColor(usedPercent)];
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" width="300" height="8" viewBox="0 0 300 8">` +
+    `<rect width="300" height="8" rx="4" fill="#8E8E93" fill-opacity="0.3"/>` +
+    (filled > 0 ? `<rect width="${filled}" height="8" rx="4" fill="${color}"/>` : "") +
+    `</svg>`;
+  // Base64, so the characters in the SVG can't break the Markdown image link.
+  return `data:image/svg+xml;base64,${Buffer.from(svg, "utf8").toString("base64")}`;
 }
 
 function pad(value: number): string {
@@ -171,35 +186,60 @@ export function hintSteps(hint: string): string[] {
 }
 
 export interface ListSummary {
+  // Tooltip for a red warning icon, shown when the last refresh failed: "<failureTitle>: <message>".
+  warning?: string;
+  // The colored badge on the row, such as "62% used".
   tag?: { text: string; tone: Tone };
+  // Plain text after the tag: the reset time, or the balance. Compact rows leave it out.
   text?: string;
-  tooltip?: string;
 }
 
-// The accessories for one list row. The headline window gives the tag and the reset text. Without windows, the first
-// balance is shown instead.
-export function listSummary(state: ProviderState, mode: DisplayMode, now: number): ListSummary {
+// The accessories for one list row. The headline window gives the tag, and the reset time too unless the row is
+// compact. Without windows, the first balance is shown instead. A failure adds a warning icon but keeps the saved
+// numbers.
+export function listSummary(
+  state: ProviderState,
+  mode: DisplayMode,
+  now: number,
+  options: { compact: boolean },
+): ListSummary {
   const { usage, failure } = state;
   if (state.loading && usage === undefined) {
     return { text: "Loading…" };
   }
   if (failure?.kind === "not-connected" && usage === undefined) {
-    return { tag: { text: "Not connected", tone: "neutral" }, tooltip: failure.message };
+    return {};
   }
 
   const summary: ListSummary = {};
   const headline = headlineWindow(usage);
+  const balance = usage?.balances[0];
   if (headline) {
     summary.tag = { text: formatPercent(headline, mode), tone: levelColor(headline.usedPercent) };
-    const reset = formatReset(headline.resetsAt, now);
-    summary.text = reset || undefined;
-  } else if (usage?.balances[0]) {
-    summary.text = formatBalance(usage.balances[0]);
+    if (!options.compact) {
+      const reset = formatReset(headline.resetsAt, now);
+      if (reset) {
+        summary.text = reset;
+      }
+    }
+  } else if (balance) {
+    if (balance.limit !== undefined && balance.limit > 0) {
+      const usedPercent = (balance.amount / balance.limit) * 100;
+      summary.tag = { text: percentText(usedPercent, mode), tone: levelColor(usedPercent) };
+      if (!options.compact) {
+        summary.text = formatBalance(balance);
+      }
+    } else {
+      summary.text = formatBalance(balance);
+    }
   }
 
   if (failure) {
-    summary.tag = { text: failureTitle(failure), tone: "error" };
-    summary.tooltip = failure.message;
+    summary.warning = `${failureTitle(failure)}: ${failure.message}`;
+    // With no saved numbers, the row would be empty, so it shows the failure title. A compact row only has the icon.
+    if (!summary.tag && !summary.text && !options.compact) {
+      summary.text = failureTitle(failure);
+    }
   }
   return summary;
 }
@@ -215,21 +255,33 @@ function hintMarkdown(hint: string): string {
 // The detail pane: one block per window, then balances and notes, or the error with its steps. Data kept from the cache
 // is labelled as such when the refresh failed.
 export function detailMarkdown(name: string, state: ProviderState, mode: DisplayMode, now: number): string {
-  const blocks: string[] = [`# ${name}`];
+  const blocks: string[] = [`## ${name}`];
   const { usage, failure } = state;
 
   if (usage) {
     for (const window of usage.windows) {
+      const percent = formatPercent(window, mode);
       const reset = formatReset(window.resetsAt, now);
-      const heading = reset ? `**${window.label}** · ${reset}` : `**${window.label}**`;
-      const lines = [heading, "", `\`${progressBar(window.usedPercent)}\` ${formatPercent(window, mode)}`];
+      const lines = [
+        `**${window.label}**`,
+        "",
+        `![${percent}](${progressBarImage(window.usedPercent)})`,
+        "",
+        reset ? `${percent} · ${reset}` : percent,
+      ];
       if (window.detail) {
         lines.push("", window.detail);
       }
       blocks.push(lines.join("\n"));
     }
     for (const balance of usage.balances) {
-      blocks.push(`**${balance.label}** ${formatBalance(balance)}`);
+      if (balance.limit !== undefined && balance.limit > 0) {
+        const usedPercent = (balance.amount / balance.limit) * 100;
+        const bar = `![${percentText(usedPercent, mode)}](${progressBarImage(usedPercent)})`;
+        blocks.push([`**${balance.label}**`, "", bar, "", formatBalance(balance)].join("\n"));
+      } else {
+        blocks.push([`**${balance.label}**`, "", formatBalance(balance)].join("\n"));
+      }
     }
     if (usage.windows.length === 0 && usage.balances.length === 0) {
       blocks.push("No limits reported for this account.");

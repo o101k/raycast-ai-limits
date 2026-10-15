@@ -3,7 +3,7 @@ import { asArray, asNumber, asRecord, asString, asTimestamp, clampPercent, reque
 import { ProviderError, ProviderUsage, Settings, UsageWindow } from "../types";
 
 // Kimi serves the Code API on two hosts. kimi.com is tried first. kimi.ai is only tried when kimi.com refuses the key or
-// doesn't have the route, which is how CodexBar reaches the international account.
+// doesn't have the route, which is how international accounts are reached.
 const PRIMARY_URL = "https://api.kimi.com/coding/v1/usages";
 const FALLBACK_URL = "https://api.kimi.ai/coding/v1/usages";
 export const CREATE_KEY_URL = "https://www.kimi.com/code/console";
@@ -20,7 +20,7 @@ const MINUTES_PER_TIME_UNIT: Record<string, number> = {
   TIME_UNIT_HOUR: 60,
   TIME_UNIT_DAY: 24 * 60,
 };
-// Plan names for the membership levels Kimi reports, as CodexBar shows them.
+// Plan names for the membership levels Kimi reports.
 const PLAN_NAMES: Record<string, string> = {
   LEVEL_FREE: "Adagio",
   LEVEL_TRIAL: "Andante",

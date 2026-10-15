@@ -10,7 +10,7 @@ import {
   hintSteps,
   levelColor,
   listSummary,
-  progressBar,
+  progressBarImage,
   ProviderState,
   summaryText,
 } from "../src/lib/format";
@@ -93,23 +93,40 @@ describe("levelColor", () => {
   });
 });
 
-describe("progressBar", () => {
-  it("is 20 cells wide by default", () => {
-    expect(progressBar(62)).toBe("█".repeat(12) + "░".repeat(8));
+function decodeBar(uri: string): string {
+  return Buffer.from(uri.split(",")[1] ?? "", "base64").toString();
+}
+
+function countRects(svg: string): number {
+  return (svg.match(/<rect/g) ?? []).length;
+}
+
+describe("progressBarImage", () => {
+  it("is a base64 SVG data URI", () => {
+    expect(progressBarImage(62)).toMatch(/^data:image\/svg\+xml;base64,/);
   });
 
-  it("is empty at 0 and full at 100", () => {
-    expect(progressBar(0)).toBe("░".repeat(20));
-    expect(progressBar(100)).toBe("█".repeat(20));
+  it("fills the share of 300 px that is used, in the level color", () => {
+    expect(decodeBar(progressBarImage(62))).toContain('<rect width="186" height="8" rx="4" fill="#59D499"/>');
   });
 
-  it("takes a width", () => {
-    expect(progressBar(50, 10)).toBe("█████░░░░░");
+  it("uses the warning color from 70 percent", () => {
+    expect(decodeBar(progressBarImage(75))).toContain('<rect width="225" height="8" rx="4" fill="#FFC531"/>');
+  });
+
+  it("uses the critical color from 90 percent", () => {
+    expect(decodeBar(progressBarImage(95))).toContain('<rect width="285" height="8" rx="4" fill="#FF6363"/>');
+  });
+
+  it("has only the track when nothing is used", () => {
+    const svg = decodeBar(progressBarImage(0));
+    expect(countRects(svg)).toBe(1);
+    expect(svg).toContain('fill="#8E8E93" fill-opacity="0.3"');
   });
 
   it("clamps out-of-range values", () => {
-    expect(progressBar(-5)).toBe("░".repeat(20));
-    expect(progressBar(150)).toBe("█".repeat(20));
+    expect(decodeBar(progressBarImage(150))).toContain('<rect width="300" height="8" rx="4" fill="#FF6363"/>');
+    expect(countRects(decodeBar(progressBarImage(-5)))).toBe(1);
   });
 });
 
@@ -219,64 +236,99 @@ describe("listSummary", () => {
     usage: usage(),
     ...overrides,
   });
+  const notCompact = { compact: false };
+  const compact = { compact: true };
 
   it("shows Loading while there is nothing to show yet", () => {
-    expect(listSummary({ loading: true }, "used", NOW)).toEqual({ text: "Loading…" });
+    expect(listSummary({ loading: true }, "used", NOW, notCompact)).toEqual({ text: "Loading…" });
   });
 
   it("shows the headline percent as a tag, colored by level, and the reset time", () => {
-    expect(listSummary(ok(), "used", NOW)).toEqual({
+    expect(listSummary(ok(), "used", NOW, notCompact)).toEqual({
       tag: { text: "62% used", tone: "ok" },
       text: "resets in 2h 13m",
     });
   });
 
+  it("leaves out the reset time in a compact row", () => {
+    expect(listSummary(ok(), "used", NOW, compact)).toEqual({ tag: { text: "62% used", tone: "ok" } });
+  });
+
   it("uses the percent left in remaining mode, still colored by usage", () => {
-    const summary = listSummary(ok({ usage: usage({ windows: [window("Session", 95, null)] }) }), "remaining", NOW);
-    expect(summary).toEqual({ tag: { text: "5% left", tone: "critical" } });
+    const state = ok({ usage: usage({ windows: [window("Session", 95, null)] }) });
+    expect(listSummary(state, "remaining", NOW, notCompact)).toEqual({ tag: { text: "5% left", tone: "critical" } });
   });
 
   it("shows the first balance when there are no windows", () => {
     const balances = [{ label: "Balance", amount: 12.34, currency: "USD" }];
-    expect(listSummary(ok({ usage: usage({ windows: [], balances }) }), "used", NOW)).toEqual({ text: "$12.34" });
+    const state = ok({ usage: usage({ windows: [], balances }) });
+    expect(listSummary(state, "used", NOW, notCompact)).toEqual({ text: "$12.34" });
+    expect(listSummary(state, "used", NOW, compact)).toEqual({ text: "$12.34" });
   });
 
-  it("shows the Not connected tag for a provider with no credentials", () => {
+  it("shows a capped balance as a percent tag, and the amount only when not compact", () => {
+    const balances = [{ label: "Extra Usage", amount: 12.34, currency: "USD", limit: 50 }];
+    const state = ok({ usage: usage({ windows: [], balances }) });
+    expect(listSummary(state, "used", NOW, notCompact)).toEqual({
+      tag: { text: "25% used", tone: "ok" },
+      text: "$12.34 of $50.00 used",
+    });
+    expect(listSummary(state, "used", NOW, compact)).toEqual({ tag: { text: "25% used", tone: "ok" } });
+  });
+
+  it("shows the percent left for a capped balance in remaining mode", () => {
+    const balances = [{ label: "Extra Usage", amount: 12.34, currency: "USD", limit: 50 }];
+    const state = ok({ usage: usage({ windows: [], balances }) });
+    expect(listSummary(state, "remaining", NOW, compact)).toEqual({ tag: { text: "75% left", tone: "ok" } });
+  });
+
+  it("shows nothing but a Not connected state for a provider with no credentials", () => {
     const state: ProviderState = {
       loading: false,
       failure: { kind: "not-connected", message: "No Codex login found", hint: "Run codex login" },
     };
-    expect(listSummary(state, "used", NOW)).toEqual({
-      tag: { text: "Not connected", tone: "neutral" },
-      tooltip: "No Codex login found",
-    });
+    expect(listSummary(state, "used", NOW, notCompact)).toEqual({});
   });
 
-  it("shows Sign in needed for rejected credentials, and keeps the saved numbers", () => {
+  it("shows a warning for rejected credentials, and keeps the saved usage tag", () => {
     const state = ok({ failure: { kind: "auth", message: "Claude rejected the credentials (HTTP 401)" } });
-    expect(listSummary(state, "used", NOW)).toEqual({
-      tag: { text: "Sign in needed", tone: "error" },
+    expect(listSummary(state, "used", NOW, notCompact)).toEqual({
+      tag: { text: "62% used", tone: "ok" },
       text: "resets in 2h 13m",
-      tooltip: "Claude rejected the credentials (HTTP 401)",
+      warning: "Sign in needed: Claude rejected the credentials (HTTP 401)",
     });
   });
 
-  it("shows Error for a failed request with no saved numbers", () => {
+  it("keeps the saved usage tag in a compact row, with only the warning added", () => {
+    const state = ok({ failure: { kind: "auth", message: "Token expired" } });
+    expect(listSummary(state, "used", NOW, compact)).toEqual({
+      tag: { text: "62% used", tone: "ok" },
+      warning: "Sign in needed: Token expired",
+    });
+  });
+
+  it("shows only a warning for a failed request with no saved numbers in a compact row", () => {
     const state: ProviderState = { loading: false, failure: { kind: "http", message: "Couldn't reach Claude" } };
-    expect(listSummary(state, "used", NOW)).toEqual({
-      tag: { text: "Error", tone: "error" },
-      tooltip: "Couldn't reach Claude",
+    expect(listSummary(state, "used", NOW, compact)).toEqual({ warning: "Error: Couldn't reach Claude" });
+  });
+
+  it("shows a warning and the Error text for a failed request with no saved numbers", () => {
+    const state: ProviderState = { loading: false, failure: { kind: "http", message: "Couldn't reach Claude" } };
+    expect(listSummary(state, "used", NOW, notCompact)).toEqual({
+      warning: "Error: Couldn't reach Claude",
+      text: "Error",
     });
   });
 });
 
 describe("detailMarkdown", () => {
-  it("has a heading and a progress bar for each window", () => {
+  it("has a heading and a progress bar image for each window", () => {
     const markdown = detailMarkdown("Claude", { loading: false, usage: usage() }, "used", NOW);
-    expect(markdown).toContain("# Claude");
-    expect(markdown).toContain("**Session** · resets in 2h 13m");
-    expect(markdown).toContain("`" + progressBar(62) + "` 62% used");
-    expect(markdown).toContain("**Weekly** · resets in 3d 4h");
+    expect(markdown).toContain("## Claude");
+    expect(markdown).toContain("**Session**\n\n![62% used](data:image/svg+xml;base64,");
+    expect(markdown).toContain("62% used · resets in 2h 13m");
+    expect(markdown).toContain("**Weekly**\n\n![30% used](data:image/svg+xml;base64,");
+    expect(markdown).toContain("30% used · resets in 3d 4h");
   });
 
   it("lists balances and notes after the windows", () => {
@@ -289,7 +341,8 @@ describe("detailMarkdown", () => {
       }),
     };
     const markdown = detailMarkdown("Claude", state, "used", NOW);
-    expect(markdown).toContain("**Extra Usage** $12.34 of $50.00 used");
+    expect(markdown).toContain("**Extra Usage**\n\n![25% used](");
+    expect(markdown).toContain("$12.34 of $50.00 used");
     expect(markdown).toContain("- Token expired, using claude.ai session");
     expect(markdown.indexOf("**Extra Usage**")).toBeLessThan(markdown.indexOf("- Token expired"));
   });

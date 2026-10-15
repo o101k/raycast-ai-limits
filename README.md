@@ -2,7 +2,7 @@
 
 See how much of your AI coding limits you've used, when they reset, and what credit is left, in one Raycast list. It covers Claude, Codex, Cursor, Gemini, GitHub Copilot, and API accounts for OpenRouter, z.ai, Kimi Code, DeepSeek and Moonshot.
 
-Run **Show AI Usage**. Each provider shows its headline limit as a colored tag (green below 70% used, yellow below 90%, red from 90%), with the time until it resets. The detail pane has every window with a progress bar, balances, and any notes.
+Run **Show AI Usage**. Each provider shows its headline limit as a colored tag (green below 70% used, yellow below 90%, red from 90%). The detail pane has every window with a progress bar and its reset time, balances, and any notes. Choose **Hide Details** (⌘⇧D) to see the plan and reset time on each row instead.
 
 ## Connect
 
@@ -54,7 +54,3 @@ Cookies expire when the site signs you out. When a provider says the credentials
 - The extension never writes to other apps' files. It never refreshes a token in a way that would sign out Claude Code or Codex, since those CLIs rotate their refresh tokens.
 - Cursor's local database is opened read-only, with the system `sqlite3` tool.
 - The usage numbers are cached on this Mac so the list opens instantly. Nothing is sent anywhere else. There is no analytics.
-
-## Inspired by CodexBar
-
-This extension is inspired by [CodexBar](https://github.com/steipete/CodexBar), a menu bar app for the same kind of usage numbers. The provider endpoints and credential locations follow the way CodexBar reads them.
