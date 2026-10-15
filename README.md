@@ -2,7 +2,7 @@
 
 See how much of your AI coding limits you've used, when they reset, and what credit is left, in one Raycast list. It covers Claude, Codex, Cursor, Gemini, GitHub Copilot, and API accounts for OpenRouter, z.ai, Kimi Code, DeepSeek and Moonshot.
 
-Run **Show AI Usage**. Each provider shows its headline limit as a colored tag (green below 70% used, yellow below 90%, red from 90%), with the time until it resets. The detail pane has every window with a progress bar, balances, and any notes.
+Run **Show AI Usage**. Each provider shows its headline limit as a colored tag (green below 70% used, yellow below 90%, red from 90%). The detail pane has every window with a progress bar and its reset time, balances, and any notes. Choose **Hide Details** (⌘⇧D) to see the plan and reset time on each row instead.
 
 ## Connect
 

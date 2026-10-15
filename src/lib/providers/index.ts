@@ -20,6 +20,8 @@ export interface Provider {
   dashboardUrl: string;
   // Site used for the list icon (via Raycast's favicon helper).
   iconUrl: string;
+  // Bundled icon files in assets/, used instead of the favicon when the site's favicon doesn't read in both themes.
+  iconAsset?: { light: string; dark: string };
   // How Connect signs this provider in.
   connect: ConnectMethod;
   // Connections the extension stores for this provider, removed by Disconnect.
@@ -71,6 +73,7 @@ export const PROVIDERS: Provider[] = [
     name: "GitHub Copilot",
     dashboardUrl: "https://github.com/settings/copilot",
     iconUrl: "https://github.com",
+    iconAsset: { light: "github-mark.svg", dark: "github-mark-dark.svg" },
     connect: { kind: "github" },
     forget: [],
     fetchUsage: fetchCopilotUsage,

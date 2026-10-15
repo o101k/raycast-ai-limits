@@ -12,7 +12,7 @@ import {
   showToast,
   Toast,
 } from "@raycast/api";
-import { getFavicon } from "@raycast/utils";
+import { getFavicon, useCachedState } from "@raycast/utils";
 import { JSX, useCallback, useEffect, useRef, useState } from "react";
 import { ApiKeyForm, ApiKeyMethod, SecretForm } from "./components/connect-forms";
 import {
@@ -178,8 +178,6 @@ const TONE_COLORS: Record<Tone, Color.ColorLike> = {
   ok: Color.Green,
   warning: Color.Yellow,
   critical: Color.Red,
-  error: Color.Red,
-  neutral: Color.SecondaryText,
 };
 
 // Connect reads best with the product's own name for these three. Every other provider reads "Connect <name>".
@@ -275,6 +273,10 @@ interface ProviderItemProps {
   connectHidden?: boolean;
   // Hides the fallback action (a session key or cookie) while the preference for the same value is set.
   fallbackHidden?: boolean;
+  // Whether the detail pane is shown. When it is, the row drops the plan and the reset time, see the summary below.
+  showingDetail: boolean;
+  // Turns the detail pane on or off, from the Hide Details and Show Details action.
+  onToggleDetail: () => void;
   onRefresh: () => void;
   onConnect: () => void;
   onConnected: (connections: Connections) => void;
@@ -292,6 +294,8 @@ function ProviderItem({
   gitHubSignedIn,
   connectHidden,
   fallbackHidden,
+  showingDetail,
+  onToggleDetail,
   onRefresh,
   onConnect,
   onConnected,
@@ -299,13 +303,15 @@ function ProviderItem({
   onSignOut,
 }: ProviderItemProps) {
   const { usage, failure } = state;
-  const summary = listSummary(state, mode, now);
+  // With the detail pane shown, the list column is narrow, so a row keeps only its tag and warning icon. The reset time
+  // moves to the detail pane, since Raycast advises against accessories next to a detail pane.
+  const summary = listSummary(state, mode, now, { compact: showingDetail });
   const accessories: List.Item.Accessory[] = [];
+  if (summary.warning) {
+    accessories.push({ icon: { source: Icon.Warning, tintColor: Color.Red }, tooltip: summary.warning });
+  }
   if (summary.tag) {
-    accessories.push({
-      tag: { value: summary.tag.text, color: TONE_COLORS[summary.tag.tone] },
-      tooltip: summary.tooltip,
-    });
+    accessories.push({ tag: { value: summary.tag.text, color: TONE_COLORS[summary.tag.tone] } });
   }
   if (summary.text) {
     accessories.push({ text: summary.text });
@@ -317,8 +323,20 @@ function ProviderItem({
       {usage?.account && <List.Item.Detail.Metadata.Label title="Account" text={usage.account} />}
       {usage && <List.Item.Detail.Metadata.Label title="Source" text={usage.source} />}
       {usage && <List.Item.Detail.Metadata.Label title="Updated" text={formatUpdated(usage.fetchedAt, now)} />}
-      {failure && <List.Item.Detail.Metadata.Label title="Status" text={failureTitle(failure)} />}
-      {failure && usage && <List.Item.Detail.Metadata.Label title="Refresh" text="Failed, showing saved data" />}
+      {failure && (
+        <List.Item.Detail.Metadata.TagList title="Status">
+          <List.Item.Detail.Metadata.TagList.Item
+            text={failureTitle(failure)}
+            color={failure.kind === "not-connected" ? Color.SecondaryText : Color.Red}
+          />
+        </List.Item.Detail.Metadata.TagList>
+      )}
+      <List.Item.Detail.Metadata.Separator />
+      <List.Item.Detail.Metadata.Link
+        title="Dashboard"
+        text={new URL(provider.dashboardUrl).hostname}
+        target={provider.dashboardUrl}
+      />
     </List.Item.Detail.Metadata>
   );
 
@@ -347,11 +365,15 @@ function ProviderItem({
   // Connect sits after Copy Usage, so Enter still refreshes a working provider.
   const connectFirst = isNotConnected(state) || (failure?.kind === "auth" && failure.code !== "account-unsupported");
 
+  // The plan is in the detail pane when that is shown. A subtitle would crowd the narrow column, so it is used only when
+  // the pane is hidden.
   return (
     <List.Item
       title={provider.name}
-      subtitle={usage?.plan}
-      icon={getFavicon(provider.iconUrl, { fallback: Icon.Gauge })}
+      subtitle={showingDetail ? undefined : usage?.plan}
+      icon={
+        provider.iconAsset ? { source: provider.iconAsset } : getFavicon(provider.iconUrl, { fallback: Icon.Gauge })
+      }
       accessories={accessories}
       detail={<List.Item.Detail markdown={detailMarkdown(provider.name, state, mode, now)} metadata={metadata} />}
       actions={
@@ -381,6 +403,12 @@ function ProviderItem({
             />
           )}
           {gitHubSignedIn === true && <Action title="Sign out of GitHub" icon={Icon.Logout} onAction={onSignOut} />}
+          <Action
+            title={showingDetail ? "Hide Details" : "Show Details"}
+            icon={Icon.Sidebar}
+            shortcut={{ modifiers: ["cmd", "shift"], key: "d" }}
+            onAction={onToggleDetail}
+          />
           <Action title="Open Extension Preferences" icon={Icon.Gear} onAction={openExtensionPreferences} />
         </ActionPanel>
       }
@@ -420,6 +448,8 @@ async function checkLogin(provider: Provider, settings: Settings): Promise<Login
 export default function Command() {
   const preferences = getPreferenceValues<Preferences.Usage>();
   const mode: DisplayMode = preferences.displayMode;
+  // Whether the detail pane is shown. The choice is kept between launches.
+  const [showingDetail, setShowingDetail] = useCachedState("show-detail", true);
 
   // The GitHub token and the saved connections are kept in refs as well as in state. Connect can run for minutes, and
   // the callbacks it uses read the refs (see currentSettings), so they never refresh with values from an older render.
@@ -756,6 +786,8 @@ export default function Command() {
         state={states[provider.id]}
         mode={mode}
         now={now}
+        showingDetail={showingDetail}
+        onToggleDetail={() => setShowingDetail((shown) => !shown)}
         settings={settings}
         connected={provider.forget.some((key) => connections?.[key] !== undefined)}
         gitHubSignedIn={provider.id === "copilot" && !hasPreferenceToken ? gitHubToken !== undefined : undefined}
@@ -774,7 +806,7 @@ export default function Command() {
   }
 
   return (
-    <List isLoading={isLoading} isShowingDetail searchBarPlaceholder="Filter providers">
+    <List isLoading={isLoading} isShowingDetail={showingDetail} searchBarPlaceholder="Filter providers">
       <List.Section title="Usage">{usageProviders.map(itemFor)}</List.Section>
       {notConnectedProviders.length > 0 && (
         <List.Section title="Not Connected">{notConnectedProviders.map(itemFor)}</List.Section>
